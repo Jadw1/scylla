@@ -130,6 +130,35 @@ def test_fromjson_int_overflow_prepared(cql, table1):
     with pytest.raises(FunctionFailure):
         cql.execute(stmt, [p, '2147483648'])
 
+# On the other hand, let's check a case of the biggest bigint (64-bit
+# integer) which should *not* overflow. Let's check that we handle it
+# correctly.
+def test_fromjson_bigint_nonoverflow(cql, table1):
+    p = unique_key_int()
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, bigv) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '9223372036854775807'])
+    assert list(cql.execute(f"SELECT bigv from {table1} where p = {p}")) == [(9223372036854775807,)]
+
+# Test the same non-overflowing integer with scientific notation. This is the
+# same test as test_fromjson_int_scientific_notation_prepared above (so
+# reproduces #10100), just with a much higher number 2^63-1. This presents
+# difficult problem for a parser that decides to read scientific notation
+# numbers through a "double" variable: a double doesn't have enough precision
+# to store a number with so many digits, so it may ruin it!
+# Note that the JSON standard (RFC 8259) explains that because implementations
+# may use double-precision representation (as the Scylla-used RapidJSON does),
+# "numbers that are integers and are in the range [-(2**53)+1, (2**53)-1] are
+# interoperable in the sense that implementations will agree exactly on their
+# numeric values.". Because the number in this test (2^63-1) is higher, the
+# JSON standard suggests it may be fine to botch it up, so it might be
+# acceptable to fail this test.
+@pytest.mark.xfail(reason="issue #10100")
+def test_fromjson_bigint_nonoverflow_scientific(cql, table1):
+    p = unique_key_int()
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, bigv) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '922337203685477580.7e1'])
+    assert list(cql.execute(f"SELECT bigv from {table1} where p = {p}")) == [(9223372036854775807,)]
+
 # When writing to an integer column, Cassandra's fromJson() function allows
 # not just JSON number constants, it also allows a string containing a number.
 # Strings which do not hold a number fail with a FunctionFailure. In
