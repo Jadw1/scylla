@@ -104,6 +104,7 @@ static constexpr auto VIEWS = "views";
 static constexpr auto TYPES = "types";
 static constexpr auto FUNCTIONS = "functions";
 static constexpr auto AGGREGATES = "aggregates";
+static constexpr auto SCYLLA_AGGREGATES = "scylla_aggregates";
 static constexpr auto INDEXES = "indexes";
 static constexpr auto VIEW_VIRTUAL_COLUMNS = "view_virtual_columns"; // Scylla specific
 static constexpr auto COMPUTED_COLUMNS = "computed_columns"; // Scylla specific

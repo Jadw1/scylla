@@ -502,6 +502,7 @@ bool user_aggregate::is_native() const { return false; }
 bool user_aggregate::is_aggregate() const { return true; }
 bool user_aggregate::requires_thread() const { return _sfunc->requires_thread() || (_finalfunc && _finalfunc->requires_thread()); }
 bool user_aggregate::has_finalfunc() const { return _finalfunc != nullptr; }
+bool user_aggregate::has_reducefunc() const { return _reducefunc != nullptr; }
 
 shared_ptr<aggregate_function>
 aggregate_fcts::make_count_rows_function() {

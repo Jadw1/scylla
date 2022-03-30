@@ -645,6 +645,34 @@ schema_ptr aggregates() {
     return schema;
 }
 
+schema_ptr scylla_aggregates() {
+    static thread_local auto schema = [] {
+        schema_builder builder(generate_legacy_id(NAME, SCYLLA_AGGREGATES), NAME, SCYLLA_AGGREGATES,
+        // partition key
+        {{"keyspace_name", utf8_type}},
+        // clustering key
+        {
+            {"aggregate_name", utf8_type}, 
+            {"argument_types", list_type_impl::get_instance(utf8_type, false)}
+        },
+        //regular columns
+        {{"reduce_func", utf8_type}},
+        //static columns,
+        {},
+        // regular column name type
+        utf8_type,
+        // comment
+        "scylla-specific information for user defined aggregates"
+        );
+        
+        builder.set_gc_grace_seconds(schema_gc_grace);
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
+        builder.with_null_sharder();
+        return builder.build();
+    }();
+    return schema;
+}
+
 schema_ptr scylla_table_schema_history() {
     static thread_local auto s = [] {
         schema_builder builder(db::system_keyspace::NAME, SCYLLA_TABLE_SCHEMA_HISTORY, generate_legacy_id(db::system_keyspace::NAME, SCYLLA_TABLE_SCHEMA_HISTORY));
@@ -1512,6 +1540,11 @@ static std::vector<data_type> read_arg_types(const query::result_set_row& row, c
     return arg_types;
 }
 
+static std::vector<data_value> read_arg_values(const query::result_set_row& row) {
+    auto args = get_list<sstring>(row, "argument_types");
+    return std::vector<data_value>(args.begin(), args.end());
+}
+
 #if 0
     // see the comments for mergeKeyspaces()
     private static void mergeAggregates(Map<DecoratedKey, ColumnFamily> before, Map<DecoratedKey, ColumnFamily> after)
@@ -1567,7 +1600,7 @@ static std::vector<data_type> read_arg_types(const query::result_set_row& row, c
     }
 #endif
 
-static shared_ptr<cql3::functions::user_function> create_func(replica::database& db, const query::result_set_row& row) {
+static shared_ptr<cql3::functions::user_function> create_func(replica::database& db, const query::result_set_row& row, lw_shared_ptr<query::result_set>) {
     cql3::functions::function_name name{
             row.get_nonnull<sstring>("keyspace_name"), row.get_nonnull<sstring>("function_name")};
     auto arg_types = read_arg_types(row, name.keyspace);
@@ -1605,7 +1638,7 @@ static shared_ptr<cql3::functions::user_function> create_func(replica::database&
     }
 }
 
-static shared_ptr<cql3::functions::user_aggregate> create_aggregate(replica::database& db, const query::result_set_row& row) {
+static shared_ptr<cql3::functions::user_aggregate> create_aggregate(replica::database& db, const query::result_set_row& row, lw_shared_ptr<query::result_set> rs) {
     cql3::functions::function_name name{
             row.get_nonnull<sstring>("keyspace_name"), row.get_nonnull<sstring>("aggregate_name")};
     auto arg_types = read_arg_types(row, name.keyspace);
@@ -1638,25 +1671,61 @@ static shared_ptr<cql3::functions::user_aggregate> create_aggregate(replica::dat
     if (initcond_str) {
         initcond = state_type->from_string(initcond_str.value());
     }
+    ::shared_ptr<cql3::functions::scalar_function> reduce_func = nullptr;
+    if (rs && !rs->empty()) {
+        auto&& rrow = rs->row(0);
+        auto rfunc = rrow.get_nonnull<sstring>("reduce_func");
 
-    return ::make_shared<cql3::functions::user_aggregate>(name, initcond, std::move(state_func), nullptr, std::move(final_func));
+        reduce_func = dynamic_pointer_cast<cql3::functions::scalar_function>(
+            cql3::functions::functions::find(cql3::functions::function_name{name.keyspace, rfunc}, {state_type, state_type}));
 
+        if (!reduce_func) {
+            throw std::runtime_error(format("Reduce function {} needed by aggregate {} not found", rfunc, name.name));
+        }
+    }
+
+    return ::make_shared<cql3::functions::user_aggregate>(name, initcond, std::move(state_func), std::move(reduce_func), std::move(final_func));
+}
+
+future<lw_shared_ptr<query::result_set>> 
+extract_scylla_specific_aggregate_info(distributed<service::storage_proxy>& proxy, const query::result_set_row& row) {
+    auto aggregate_name = row.get<sstring>("aggregate_name");
+    if (!aggregate_name) {
+        co_return nullptr;
+    }
+
+    auto keyspace_name = row.get_nonnull<sstring>("keyspace_name");
+    auto arg_types = read_arg_values(row);
+    auto schema = scylla_aggregates();
+
+    auto arg_list_type = list_type_impl::get_instance(utf8_type, false);
+    auto arg_list_val = make_list_value(arg_list_type, arg_types);
+
+    auto pkey = dht::decorate_key(*schema, partition_key::from_singular(*schema, keyspace_name));
+    auto ckey = clustering_key::from_exploded(*schema, {
+        utf8_type->decompose(aggregate_name.value()),
+        arg_list_type->decompose(arg_list_val)
+    });
+
+    co_return co_await db::system_keyspace::query(proxy, NAME, SCYLLA_AGGREGATES, pkey, query::clustering_range::make_singular(ckey));
 }
 
 static future<> merge_functions(distributed<service::storage_proxy>& proxy, schema_result before, schema_result after,
-        std::function<shared_ptr<cql3::functions::function>(replica::database& db, const query::result_set_row& row)> create) {
+        std::function<shared_ptr<cql3::functions::function>(replica::database& db, const query::result_set_row& row, lw_shared_ptr<query::result_set> rs)> create) {
     auto diff = diff_rows(before, after);
 
-    co_await proxy.local().get_db().invoke_on_all([&] (replica::database& db) {
+    co_await proxy.local().get_db().invoke_on_all([&] (replica::database& db) -> future<> {
         for (const auto& val : diff.created) {
-            cql3::functions::functions::add_function(create(db, *val));
+            auto scylla_specific_ag = co_await extract_scylla_specific_aggregate_info(proxy, *val);
+            cql3::functions::functions::add_function(create(db, *val, std::move(scylla_specific_ag)));
         }
         for (const auto& val : diff.dropped) {
-            auto func = create(db, *val);
+            auto func = create(db, *val, nullptr);
             cql3::functions::functions::remove_function(func->name(), func->arg_types());
         }
         for (const auto& val : diff.altered) {
-            cql3::functions::functions::replace_function(create(db, *val));
+            auto scylla_specific_ag = co_await extract_scylla_specific_aggregate_info(proxy, *val);
+            cql3::functions::functions::replace_function(create(db, *val, std::move(scylla_specific_ag)));
         }
     });
 }
@@ -1858,7 +1927,7 @@ std::vector<shared_ptr<cql3::functions::user_function>> create_functions_from_sc
         replica::database& db, lw_shared_ptr<query::result_set> result) {
     std::vector<shared_ptr<cql3::functions::user_function>> ret;
     for (const auto& row : result->rows()) {
-        ret.emplace_back(create_func(db, row));
+        ret.emplace_back(create_func(db, row, nullptr));
     }
     return ret;
 }
@@ -2028,11 +2097,29 @@ std::vector<mutation> make_create_aggregate_mutations(shared_ptr<cql3::functions
     m.set_clustered_cell(ckey, "return_type", aggregate->return_type()->as_cql3_type().to_string(), timestamp);
     m.set_clustered_cell(ckey, "state_func", aggregate->sfunc().name().name, timestamp);
     m.set_clustered_cell(ckey, "state_type", state_type->as_cql3_type().to_string(), timestamp);
-    return {m};
+    std::vector<mutation> muts = {m};
+
+    if (aggregate->has_reducefunc()) {
+        schema_ptr ss = scylla_aggregates();
+        auto sp = get_mutation(ss, *aggregate);
+        mutation& sm = sp.first;
+        clustering_key& sckey = sp.second;
+        sm.set_clustered_cell(sckey, "reduce_func", aggregate->reducefunc().name().name, timestamp);
+
+        muts.emplace_back(sm);
+    }
+
+    return muts;
 }
 
 std::vector<mutation> make_drop_aggregate_mutations(shared_ptr<cql3::functions::user_aggregate> aggregate, api::timestamp_type timestamp) {
-    return make_drop_function_mutations(aggregates(), *aggregate, timestamp);
+    auto muts = make_drop_function_mutations(aggregates(), *aggregate, timestamp);
+    if (aggregate->has_reducefunc()) {
+        auto scylla_muts = make_drop_function_mutations(scylla_aggregates(), *aggregate, timestamp);
+        muts.insert(muts.end(), scylla_muts.begin(), scylla_muts.end());
+    }
+
+    return muts;
 }
 
 /*
@@ -3219,7 +3306,7 @@ std::vector<schema_ptr> all_tables(schema_features features) {
     // for schema digest calculation. Refs #4457.
     std::vector<schema_ptr> result = {
         keyspaces(), tables(), scylla_tables(), columns(), dropped_columns(), triggers(),
-        views(), types(), functions(), aggregates(), indexes()
+        views(), types(), functions(), aggregates(), scylla_aggregates(), indexes()
     };
     if (features.contains<schema_feature::VIEW_VIRTUAL_COLUMNS>()) {
         result.emplace_back(view_virtual_columns());

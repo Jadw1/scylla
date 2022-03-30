@@ -28,9 +28,13 @@ public:
     virtual bool is_aggregate() const override;
     virtual bool requires_thread() const override;
     bool has_finalfunc() const;
+    bool has_reducefunc() const;
 
     const scalar_function& sfunc() const {
         return *_sfunc;
+    }
+    const scalar_function& reducefunc() const {
+        return *_reducefunc;
     }
     const scalar_function& finalfunc() const {
         return *_finalfunc;
