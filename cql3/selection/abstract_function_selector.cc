@@ -79,6 +79,11 @@ abstract_function_selector::new_factory(shared_ptr<functions::function> fun, sha
             }
             return p->name().name == "countRows";
         }
+
+        virtual bool is_reducible_selector_factory() const override {
+            return _fun->is_reducible();
+        }
+
     };
 
     return make_shared<fun_selector_factory>(std::move(fun), std::move(factories));

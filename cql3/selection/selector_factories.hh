@@ -108,6 +108,14 @@ public:
         return _factories[0]->is_count_selector_factory();
     }
 
+    bool does_reduction() const {
+        if (_factories.size() != 1) {
+            return false;
+        }
+
+        return _factories[0]->is_reducible_selector_factory();
+    }
+
     /**
      * Checks if this <code>SelectorFactories</code> contains at least one factory for writetime selectors.
      *

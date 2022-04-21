@@ -35,6 +35,10 @@ public:
     virtual bool is_aggregate() const override final {
         return true;
     }
+
+    virtual bool is_reducible() const override {
+        return false; //FIXME: after implementing reducible native aggregates
+    }
 };
 
 }

@@ -185,6 +185,10 @@ public:
         return _factories->does_count();
     }
 
+    virtual bool is_reducible() const override {
+        return _factories->does_reduction();
+    }
+
 protected:
     class selectors_with_processing : public selectors {
     private:

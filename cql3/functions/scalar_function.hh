@@ -32,6 +32,9 @@ public:
      * @throws InvalidRequestException if this function cannot not be applied to the parameter
      */
     virtual bytes_opt execute(cql_serialization_format sf, const std::vector<bytes_opt>& parameters) = 0;
+
+    /* Only aggregate function can be reducible */
+    virtual bool is_reducible() const { return false; }
 };
 
 

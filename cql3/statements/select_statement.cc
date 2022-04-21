@@ -1629,7 +1629,10 @@ std::unique_ptr<prepared_statement> select_statement::prepare(data_dictionary::d
     // using `forward_service`.
     auto can_be_forwarded = [&] {
         return selection->is_aggregate()        // Aggregation only
-            && selection->is_count()            // Only count(*) selection is supported.
+            && ( // SUPPORTED PARALLELIZATION
+                selection->is_count() || //FIXME: remove when native aggregates will hava implemented reduction
+                selection->is_reducible()
+            )
             && !restrictions->need_filtering()  // No filtering
             && group_by_cell_indices->empty()   // No GROUP BY
             // All potential intermediate coordinators must support forwarding

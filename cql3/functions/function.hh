@@ -53,6 +53,13 @@ public:
      */
     virtual bool is_aggregate() const = 0;
 
+    /**
+     * Checks wheather the function can be distributed and is able to reduce states.
+     *
+     * @return <code>true</code> if the function is reducible, <code>false</code> otherwise.
+     */
+    virtual bool is_reducible() const = 0;
+
     virtual void print(std::ostream& os) const = 0;
 
     /**
