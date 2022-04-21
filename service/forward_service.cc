@@ -32,6 +32,7 @@
 #include "tracing/trace_state.hh"
 #include "tracing/tracing.hh"
 #include "utils/fb_utilities.hh"
+#include "utils/overloaded_functor.hh"
 
 #include "cql3/column_identifier.hh"
 #include "cql3/cql_config.hh"
@@ -182,24 +183,29 @@ future<> forward_service::stop() {
 // stored in `forward_request`. It has to mocked on the receiving node,
 // based on requested reduction types.
 static shared_ptr<cql3::selection::selection> mock_selection(
-    const std::vector<query::forward_request::reduction_type>& reduction_types,
+    const std::vector<query::forward_request::reduction>& reductions,
     schema_ptr schema,
     replica::database& db
 ) {
     std::vector<shared_ptr<cql3::selection::raw_selector>> raw_selectors;
 
-    auto mock_singular_selection = [&] (const query::forward_request::reduction_type& type) {
-        switch (type) {
-            case query::forward_request::reduction_type::count: {
+    auto mock_singular_selection = [&] (const query::forward_request::reduction& reduction) {
+        return std::visit(overloaded_functor {
+            [&](const query::forward_request::count& count) {
                 auto selectable = cql3::selection::make_count_rows_function_expression();
                 auto column_identifier = make_shared<cql3::column_identifier>("count", false);
                 return make_shared<cql3::selection::raw_selector>(selectable, column_identifier);
+            },
+            [&](const query::forward_request::uda& uda) {
+                auto selectable = cql3::selection::make_function_expression(uda.keyspace, uda.uda_name, uda.column_names);
+                auto column_identifier = make_shared<cql3::column_identifier>(uda.uda_name, false);
+                return make_shared<cql3::selection::raw_selector>(selectable, column_identifier);
             }
-        }
+        }, reduction);
     };
 
-    for (auto const& type : reduction_types) {
-        raw_selectors.emplace_back(mock_singular_selection(type));
+    for (auto const& reduction : reductions) {
+        raw_selectors.emplace_back(mock_singular_selection(reduction));
     }
 
     return cql3::selection::selection::from_selectors(db.as_data_dictionary(), schema, std::move(raw_selectors));
@@ -218,7 +224,7 @@ future<query::forward_result> forward_service::dispatch_to_shards(
         std::optional<query::forward_result>(),
         [&req] (std::optional<query::forward_result> partial, query::forward_result mapped) -> std::optional<query::forward_result>{
             if (partial) {
-                mapped.merge(*partial, req.reduction_types);
+                mapped.merge(*partial, req);
             }
             return {mapped};
         }
@@ -248,7 +254,7 @@ future<query::forward_result> forward_service::execute_on_this_shard(
     auto timeout = req.timeout;
     auto now = gc_clock::now();
 
-    auto selection = mock_selection(req.reduction_types, schema, _db.local());
+    auto selection = mock_selection(req.reductions, schema, _db.local());
     auto query_state = make_lw_shared<service::query_state>(
         client_state::for_internal_calls(),
         tr_state,
@@ -285,21 +291,21 @@ future<query::forward_result> forward_service::execute_on_this_shard(
         co_await pager->fetch_page(rs_builder, DEFAULT_INTERNAL_PAGING_SIZE, now, timeout);
     }
 
-    co_return co_await rs_builder.with_thread_if_needed([&rs_builder, reduction_types = std::move(req.reduction_types), tr_state = std::move(tr_state)] {
+    co_return co_await rs_builder.with_thread_if_needed([&rs_builder, reductions = std::move(req.reductions), tr_state = std::move(tr_state)] {
         auto rs = rs_builder.build();
         auto& rows = rs->rows();
         if (rows.size() != 1) {
             flogger.error("aggregation result row count != 1");
             throw std::runtime_error("aggregation result row count != 1");
         }
-        if (rows[0].size() != reduction_types.size()) {
+        if (rows[0].size() != reductions.size()) {
             flogger.error("aggregation result column count does not match requested column count");
             throw std::runtime_error("aggregation result column count does not match requested column count");
         }
         query::forward_result res = { .query_results = rows[0] };
 
         query::forward_result::printer res_printer{
-            .types = reduction_types,
+            .types = reductions,
             .res = res
         };
         tracing::trace(tr_state, "On shard execution result is {}", res_printer);
@@ -386,14 +392,14 @@ future<query::forward_result> forward_service::dispatch(query::forward_request r
                     );
 
                     query::forward_result::printer partial_result_printer{
-                        .types = req_with_modified_pr.reduction_types,
+                        .types = req_with_modified_pr.reductions,
                         .res = partial_result
                     };
                     tracing::trace(tr_state_, "Received forward_result={} from {}", partial_result_printer, addr);
                     flogger.debug("received forward_result={} from {}", partial_result_printer, addr);
 
                     if (result_) {
-                        result_->merge(partial_result, req_with_modified_pr.reduction_types);
+                        result_->merge(partial_result, req_with_modified_pr);
                     } else {
                         result_ = partial_result;
                     }
@@ -401,7 +407,7 @@ future<query::forward_result> forward_service::dispatch(query::forward_request r
             ).then(
                 [&result, &req, &tr_state] () -> query::forward_result {
                     query::forward_result::printer result_printer{
-                        .types = req.reduction_types,
+                        .types = req.reductions,
                         .res = *result
                     };
                     tracing::trace(tr_state, "Merged result is {}", result_printer);

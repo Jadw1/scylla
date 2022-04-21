@@ -7,6 +7,7 @@
  */
 
 #include <limits>
+#include "cql3/functions/function_name.hh"
 #include "query-request.hh"
 #include "query-result.hh"
 #include "query-result-writer.hh"
@@ -17,6 +18,10 @@
 #include "query-result-reader.hh"
 #include "query_result_merger.hh"
 #include "partition_slice_builder.hh"
+#include "schema_registry.hh"
+#include "utils/overloaded_functor.hh"
+#include "cql3/functions/user_aggregate.hh"
+#include "cql3/functions/functions.hh"
 
 namespace query {
 
@@ -62,13 +67,20 @@ std::ostream& operator<<(std::ostream& out, const read_command& r) {
         << "}";
 }
 
-std::ostream& operator<<(std::ostream& out, const forward_request::reduction_type& r) {
+std::ostream& operator<<(std::ostream& out, const forward_request::reduction& r) {
     out << "reduction_type{";
-    switch (r) {
-        case forward_request::reduction_type::count:
+    std::visit(overloaded_functor {
+        [&](const forward_request::count& count) {
             out << "count";
-            break;
-    }
+        },
+        [&](const forward_request::uda& uda) {
+            out << "uda{"
+            << "keyspace=" << uda.keyspace
+            << ", uda_name=" << uda.uda_name
+            << ", column_names=[" << join(",", uda.column_names) << "]" 
+            << "}";
+        }
+    }, r);
     return out << "}";
 }
 
@@ -76,7 +88,7 @@ std::ostream& operator<<(std::ostream& out, const forward_request& r) {
     auto ms = std::chrono::time_point_cast<std::chrono::milliseconds>(r.timeout).time_since_epoch().count();
 
     return out << "forward_request{"
-        << "reduction_types=[" << join(",", r.reduction_types) << "]"
+        << "reduction_types=[" << join(",", r.reductions) << "]"
         << ", cmd=" << r.cmd
         << ", pr=" << r.pr
         << ", cl=" << r.cl
@@ -390,35 +402,46 @@ foreign_ptr<lw_shared_ptr<query::result>> result_merger::get() {
     return make_foreign(make_lw_shared<query::result>(std::move(w), is_short_read, row_count, partition_count));
 }
 
-static bytes_opt merge_singular_results(bytes_opt r1, bytes_opt r2, forward_request::reduction_type reduction) {
-    switch (reduction) {
-        case forward_request::reduction_type::count: {
+static bytes_opt merge_singular_results(bytes_opt r1, bytes_opt r2, forward_request::reduction reduction, schema_ptr schema) {
+    return std::visit(overloaded_functor {
+        [&] (const forward_request::count& count) {
             auto count1 = value_cast<int64_t>(long_type->deserialize(bytes_view(*r1)));
             auto count2 = value_cast<int64_t>(long_type->deserialize(bytes_view(*r2)));
             return data_value(count1 + count2).serialize();
+        },
+        [&] (const forward_request::uda& uda) {
+            std::vector<data_type> types;
+            for(auto& name: uda.column_names) {
+                types.emplace_back(schema->get_column_definition(to_bytes(name))->type);
+            }
+            auto aggregate = dynamic_pointer_cast<cql3::functions::user_aggregate>(
+                cql3::functions::functions::find(cql3::functions::function_name{uda.keyspace, uda.uda_name}, types)
+            );
+            auto& reducer = aggregate->reducefunc();
+            return reducer.execute(cql_serialization_format::internal(), {r1, r2});
         }
-    }
-    throw std::runtime_error("unknown reduction type");
+    }, reduction);
 }
 
-void forward_result::merge(const forward_result& other, const std::vector<forward_request::reduction_type>& reduction_types) {
+void forward_result::merge(const forward_result& other, const forward_request& request) {
     if (query_results.empty()) {
         query_results.resize(other.query_results.size());
     }
 
-    if (query_results.size() != other.query_results.size() || query_results.size() != reduction_types.size()) {
+    if (query_results.size() != other.query_results.size() || query_results.size() != request.reductions.size()) {
         on_internal_error(
             qlogger,
             format("forward_result::merge(): operation cannot be completed due to invalid argument sizes. "
                     "this.query_results.size(): {} "
                     "other.query_results.size(): {} "
-                    "reduction_types.size(): {}",
-                    query_results.size(), other.query_results.size(), reduction_types.size())
+                    "reductions.size(): {}",
+                    query_results.size(), other.query_results.size(), request.reductions.size())
         );
     }
 
+    schema_ptr schema = local_schema_registry().get(request.cmd.schema_version);
     for (size_t i = 0; i < query_results.size(); i++) {
-        query_results[i] = merge_singular_results(query_results[i], other.query_results[i], reduction_types[i]);
+        query_results[i] = merge_singular_results(query_results[i], other.query_results[i], request.reductions[i], schema);
     }
 }
 
@@ -430,12 +453,17 @@ std::ostream& operator<<(std::ostream& out, const query::forward_result::printer
 
     out << "[";
     for (size_t i = 0; i < p.types.size(); i++) {
-        switch (p.types[i]) {
-            case forward_request::reduction_type::count: {
+        std::visit(overloaded_functor {
+            [&](const forward_request::count& _count) {
+                auto count = value_cast<int64_t>(long_type->deserialize(bytes_view(*p.res.query_results[i])));
+                out << count;
+            },
+            [&](const forward_request::uda& uda) {
+                //FIXME: get output type from aggregate function
                 auto count = value_cast<int64_t>(long_type->deserialize(bytes_view(*p.res.query_results[i])));
                 out << count;
             }
-        }
+        }, p.types[i]);
 
         if (i + 1 < p.types.size()) {
             out << ", ";

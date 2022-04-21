@@ -362,13 +362,17 @@ public:
 };
 
 struct forward_request {
-    enum class reduction_type {
-        count,
+    struct count {};
+    struct uda {
+        sstring keyspace;
+        sstring uda_name;
+        std::vector<sstring> column_names;
     };
+    using reduction = std::variant<count, uda>;
 
     // multiple reduction types are needed to support queries like:
     // `SELECT min(x), max(x), avg(x) FROM tab`
-    std::vector<reduction_type> reduction_types;
+    std::vector<reduction> reductions;
 
     query::read_command cmd;
     dht::partition_range_vector pr;
@@ -378,16 +382,16 @@ struct forward_request {
 };
 
 std::ostream& operator<<(std::ostream& out, const forward_request& r);
-std::ostream& operator<<(std::ostream& out, const forward_request::reduction_type& r);
+std::ostream& operator<<(std::ostream& out, const forward_request::reduction& r);
 
 struct forward_result {
     // vector storing query result for each selected column
     std::vector<bytes_opt> query_results;
 
-    void merge(const forward_result& other, const std::vector<forward_request::reduction_type>& types);
+    void merge(const forward_result& other, const forward_request& request);
 
     struct printer {
-        const std::vector<forward_request::reduction_type>& types;
+        const std::vector<forward_request::reduction>& types;
         const query::forward_result& res;
     };
 };

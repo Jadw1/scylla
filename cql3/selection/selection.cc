@@ -189,6 +189,10 @@ public:
         return _factories->does_reduction();
     }
 
+    virtual std::optional<query::forward_request::uda> get_uda_reduction() const override {
+        return _factories->get_uda_reduction();
+    }
+
 protected:
     class selectors_with_processing : public selectors {
     private:

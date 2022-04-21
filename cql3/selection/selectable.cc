@@ -104,6 +104,18 @@ make_count_rows_function_expression() {
                     std::vector<cql3::expr::expression>()};
 }
 
+expr::expression
+make_function_expression(const sstring& keyspace, const sstring& name, const std::vector<sstring>& args) {
+    std::vector<expr::expression> args_expr;
+    for (auto& a : args) {
+        args_expr.emplace_back(expr::unresolved_identifier{make_shared<column_identifier_raw>(a, false)});
+    }
+
+    return expr::function_call{
+            cql3::functions::function_name(keyspace, name),
+                    std::move(args_expr)};
+}
+
 shared_ptr<selector::factory>
 selectable::with_anonymous_function::new_selector_factory(data_dictionary::database db, schema_ptr s, std::vector<const column_definition*>& defs) {
     auto&& factories = selector_factories::create_factories_and_collect_column_definitions(_args, db, s, defs);

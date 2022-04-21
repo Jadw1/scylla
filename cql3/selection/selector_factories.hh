@@ -16,6 +16,7 @@
 #include <vector>
 #include "cql3/selection/selector.hh"
 #include "schema.hh"
+#include "query-request.hh"
 
 namespace cql3 {
 
@@ -114,6 +115,14 @@ public:
         }
 
         return _factories[0]->is_reducible_selector_factory();
+    }
+
+    std::optional<query::forward_request::uda> get_uda_reduction() const {
+        if (_factories.size() != 1) {
+            return std::nullopt;
+        }
+
+        return _factories[0]->get_uda_reduction();
     }
 
     /**

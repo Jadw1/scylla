@@ -15,6 +15,7 @@
 
 #include <vector>
 #include "cql3/assignment_testable.hh"
+#include "query-request.hh"
 #include "types.hh"
 #include "schema_fwd.hh"
 #include "counters.hh"
@@ -136,6 +137,8 @@ public:
     virtual bool is_reducible_selector_factory() const {
         return false;
     }
+
+    virtual std::optional<query::forward_request::uda> get_uda_reduction() const {return std::nullopt;}
 
     /**
      * Checks if this factory creates <code>writetime</code> selectors instances.

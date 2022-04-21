@@ -84,6 +84,19 @@ abstract_function_selector::new_factory(shared_ptr<functions::function> fun, sha
             return _fun->is_reducible();
         }
 
+        virtual std::optional<query::forward_request::uda> get_uda_reduction() const override {
+            auto p = dynamic_cast<functions::user_aggregate*>(_fun.get());
+            if (!p) {
+                return std::nullopt;
+            }
+
+            return query::forward_request::uda {
+                .keyspace = p->name().keyspace,
+                .uda_name = p->name().name,
+                .column_names = _factories->get_column_names()
+            };
+        }
+
     };
 
     return make_shared<fun_selector_factory>(std::move(fun), std::move(factories));

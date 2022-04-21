@@ -15,6 +15,7 @@
 namespace cql3::selection {
 
 expr::expression make_count_rows_function_expression();
+expr::expression make_function_expression(const sstring& keyspace, const sstring& name, const std::vector<sstring>& args);
 shared_ptr<selectable> prepare_selectable(const schema& s, const expr::expression& raw_selectable);
 bool selectable_processes_selection(const expr::expression& raw_selectable);
 

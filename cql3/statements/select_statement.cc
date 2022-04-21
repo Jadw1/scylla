@@ -24,6 +24,7 @@
 #include "cql3/selection/selector_factories.hh"
 #include "validation.hh"
 #include "exceptions/unrecognized_entity_exception.hh"
+#include <optional>
 #include <seastar/core/shared_ptr.hh>
 #include "query-result-reader.hh"
 #include "query_ranges_to_vnodes.hh"
@@ -1348,6 +1349,15 @@ indexed_table_select_statement::find_index_clustering_rows(query_processor& qp, 
     }));
 }
 
+static query::forward_request::reduction get_reduction_type(const ::shared_ptr<selection::selection>& selection) {
+    if (selection->is_count()) {
+        return query::forward_request::count{};
+    } else if (selection->is_reducible()) { //FIXME: after implementing reducible native aggregates, (split uda/native?)
+        return selection->get_uda_reduction().value();
+    }
+
+    throw exceptions::invalid_request_exception("Unsupported type of aggregate parallelization");
+}
 
 class parallelized_select_statement : public select_statement {
 public:
@@ -1498,7 +1508,7 @@ parallelized_select_statement::do_execute(
     auto timeout = db::timeout_clock::now() + timeout_duration;
 
     query::forward_request req = {
-        .reduction_types = {query::forward_request::reduction_type::count},
+        .reductions = {get_reduction_type(_selection)},
         .cmd = *command,
         .pr = std::move(key_ranges),
         .cl = options.get_consistency(),

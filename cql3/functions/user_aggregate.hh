@@ -33,7 +33,7 @@ public:
     const scalar_function& sfunc() const {
         return *_sfunc;
     }
-    const scalar_function& reducefunc() const {
+    scalar_function& reducefunc() const {
         return *_reducefunc;
     }
     const scalar_function& finalfunc() const {

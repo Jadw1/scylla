@@ -149,6 +149,8 @@ public:
 
     virtual bool is_reducible() const {return false;}
 
+    virtual std::optional<query::forward_request::uda> get_uda_reduction() const {return std::nullopt;}
+
     /**
      * Checks that selectors are either all aggregates or that none of them is.
      *

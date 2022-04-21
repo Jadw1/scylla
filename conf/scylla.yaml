@@ -258,9 +258,10 @@ batch_size_fail_threshold_in_kb: 1024
 # be set.
 # broadcast_rpc_address: 1.2.3.4
 
+enable_user_defined_functions: true
 # Uncomment to enable experimental features
-# experimental_features:
-#     - udf
+experimental_features:
+    - udf
 #     - alternator-streams
 #     - alternator-ttl
 #     - raft
@@ -527,4 +528,4 @@ murmur3_partitioner_ignore_msb_bits: 12
 
 # Use on a new, parallel algorithm for performing aggregate queries.
 # Set to `false` to fall-back to the old algorithm.
-# enable_parallelized_aggregation: true
+enable_parallelized_aggregation: true

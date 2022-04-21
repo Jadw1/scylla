@@ -1,9 +1,12 @@
 namespace query {
 struct forward_request {
-    enum class reduction_type : uint8_t {
-        count,
+    struct count {};
+    struct uda {
+        sstring keyspace;
+        sstring uda_name;
+        std::vector<sstring> column_names;
     };
-    std::vector<query::forward_request::reduction_type> reduction_types;
+    std::vector<std::variant<query::forward_request::count, query::forward_request::uda>> reductions;
 
     query::read_command cmd;
     dht::partition_range_vector pr;
