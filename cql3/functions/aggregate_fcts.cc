@@ -18,6 +18,7 @@
 #include "functions.hh"
 #include "native_aggregate_function.hh"
 #include "exceptions/exceptions.hh"
+#include <memory>
 
 using namespace cql3;
 using namespace functions;
@@ -503,6 +504,12 @@ bool user_aggregate::is_aggregate() const { return true; }
 bool user_aggregate::is_reducible() const { return _reducefunc != nullptr; }
 bool user_aggregate::requires_thread() const { return _sfunc->requires_thread() || (_finalfunc && _finalfunc->requires_thread()); }
 bool user_aggregate::has_finalfunc() const { return _finalfunc != nullptr; }
+
+::shared_ptr<user_aggregate> user_aggregate::reducible_aggregate() const {
+    auto name = _name;
+    name.name += "_reducible";
+    return ::make_shared<user_aggregate>(name, _initcond, _sfunc, _reducefunc, nullptr);
+}
 
 shared_ptr<aggregate_function>
 aggregate_fcts::make_count_rows_function() {

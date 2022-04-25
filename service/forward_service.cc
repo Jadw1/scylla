@@ -42,7 +42,8 @@
 #include "cql3/selection/selectable-expr.hh"
 #include "cql3/selection/selectable.hh"
 #include "cql3/selection/selection.hh"
-
+#include "cql3/functions/functions.hh"
+#include "cql3/functions/user_aggregate.hh"
 namespace service {
 
 static constexpr int DEFAULT_INTERNAL_PAGING_SIZE = 10000;
@@ -183,28 +184,31 @@ future<> forward_service::stop() {
 // stored in `forward_request`. It has to mocked on the receiving node,
 // based on requested reduction types.
 static shared_ptr<cql3::selection::selection> mock_selection(
-    const std::vector<query::forward_request::reduction>& reductions,
+    std::vector<query::forward_request::reduction>& reductions,
     schema_ptr schema,
     replica::database& db
 ) {
     std::vector<shared_ptr<cql3::selection::raw_selector>> raw_selectors;
 
-    auto mock_singular_selection = [&] (const query::forward_request::reduction& reduction) {
+    auto mock_singular_selection = [&] (query::forward_request::reduction& reduction) {
         return std::visit(overloaded_functor {
-            [&](const query::forward_request::count& count) {
+            [&](query::forward_request::count& count) {
                 auto selectable = cql3::selection::make_count_rows_function_expression();
                 auto column_identifier = make_shared<cql3::column_identifier>("count", false);
                 return make_shared<cql3::selection::raw_selector>(selectable, column_identifier);
             },
-            [&](const query::forward_request::uda& uda) {
-                auto selectable = cql3::selection::make_function_expression(uda.keyspace, uda.uda_name, uda.column_names);
+            [&](query::forward_request::uda& uda) {
+                auto aggr = dynamic_pointer_cast<cql3::functions::user_aggregate>(uda.get_function(schema));
+                auto reducible_aggr = aggr->reducible_aggregate();
+
+                auto selectable = cql3::selection::make_function_expression(reducible_aggr, uda.column_names);
                 auto column_identifier = make_shared<cql3::column_identifier>(uda.uda_name, false);
                 return make_shared<cql3::selection::raw_selector>(selectable, column_identifier);
             }
         }, reduction);
     };
 
-    for (auto const& reduction : reductions) {
+    for (auto& reduction : reductions) {
         raw_selectors.emplace_back(mock_singular_selection(reduction));
     }
 
@@ -412,6 +416,8 @@ future<query::forward_result> forward_service::dispatch(query::forward_request r
                     };
                     tracing::trace(tr_state, "Merged result is {}", result_printer);
                     flogger.debug("merged result is {}", result_printer);
+
+                    result->finalize(req);
 
                     return *result;
                 }

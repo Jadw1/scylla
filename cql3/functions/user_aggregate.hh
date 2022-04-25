@@ -9,6 +9,7 @@
 #pragma once
 
 #include "abstract_function.hh"
+#include "cql3/functions/function_name.hh"
 #include "scalar_function.hh"
 #include "aggregate_function.hh"
 
@@ -29,6 +30,7 @@ public:
     virtual bool is_reducible() const override;
     virtual bool requires_thread() const override;
     bool has_finalfunc() const;
+    ::shared_ptr<user_aggregate> reducible_aggregate() const;
 
     const scalar_function& sfunc() const {
         return *_sfunc;
@@ -36,7 +38,7 @@ public:
     scalar_function& reducefunc() const {
         return *_reducefunc;
     }
-    const scalar_function& finalfunc() const {
+    scalar_function& finalfunc() const {
         return *_finalfunc;
     }
     const bytes_opt& initcond() const {

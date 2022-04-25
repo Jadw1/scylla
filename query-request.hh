@@ -9,8 +9,10 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
+#include "cql3/functions/function.hh"
 #include "keys.hh"
 #include "dht/i_partitioner.hh"
 #include "enum_set.hh"
@@ -367,6 +369,9 @@ struct forward_request {
         sstring keyspace;
         sstring uda_name;
         std::vector<sstring> column_names;
+
+        ::shared_ptr<cql3::functions::function> _function = nullptr;
+        ::shared_ptr<cql3::functions::function> get_function(schema_ptr& schema);
     };
     using reduction = std::variant<count, uda>;
 
@@ -389,6 +394,7 @@ struct forward_result {
     std::vector<bytes_opt> query_results;
 
     void merge(const forward_result& other, const forward_request& request);
+    void finalize(const forward_request& request);
 
     struct printer {
         const std::vector<forward_request::reduction>& types;

@@ -12,6 +12,7 @@
 #include "query-result.hh"
 #include "query-result-writer.hh"
 #include "query-result-set.hh"
+#include "seastar/core/thread.hh"
 #include "to_string.hh"
 #include "bytes.hh"
 #include "mutation_partition_serializer.hh"
@@ -404,21 +405,32 @@ foreign_ptr<lw_shared_ptr<query::result>> result_merger::get() {
 
 static bytes_opt merge_singular_results(bytes_opt r1, bytes_opt r2, forward_request::reduction reduction, schema_ptr schema) {
     return std::visit(overloaded_functor {
-        [&] (const forward_request::count& count) {
+        [&] (forward_request::count& count) {
             auto count1 = value_cast<int64_t>(long_type->deserialize(bytes_view(*r1)));
             auto count2 = value_cast<int64_t>(long_type->deserialize(bytes_view(*r2)));
             return data_value(count1 + count2).serialize();
         },
-        [&] (const forward_request::uda& uda) {
-            std::vector<data_type> types;
-            for(auto& name: uda.column_names) {
-                types.emplace_back(schema->get_column_definition(to_bytes(name))->type);
-            }
-            auto aggregate = dynamic_pointer_cast<cql3::functions::user_aggregate>(
-                cql3::functions::functions::find(cql3::functions::function_name{uda.keyspace, uda.uda_name}, types)
-            );
+        [&] (forward_request::uda& uda) {
+            auto aggregate = dynamic_pointer_cast<cql3::functions::user_aggregate>(uda.get_function(schema));
             auto& reducer = aggregate->reducefunc();
-            return reducer.execute(cql_serialization_format::internal(), {r1, r2});
+            return seastar::async([&] {
+                return reducer.execute(cql_serialization_format::internal(), {r1, r2});
+            }).get0();
+        }
+    }, reduction);
+}
+
+static bytes_opt finalize_singular_result(bytes_opt r, forward_request::reduction reduction, schema_ptr schema) {
+    return std::visit(overloaded_functor {
+        [&] (forward_request::count& count) {
+            return r;
+        },
+        [&] (forward_request::uda& uda) {
+            auto aggregate = dynamic_pointer_cast<cql3::functions::user_aggregate>(uda.get_function(schema));
+            auto& final = aggregate->finalfunc();
+            return seastar::async([&] {
+                return final.execute(cql_serialization_format::internal(), {r});
+            }).get0();
         }
     }, reduction);
 }
@@ -442,6 +454,13 @@ void forward_result::merge(const forward_result& other, const forward_request& r
     schema_ptr schema = local_schema_registry().get(request.cmd.schema_version);
     for (size_t i = 0; i < query_results.size(); i++) {
         query_results[i] = merge_singular_results(query_results[i], other.query_results[i], request.reductions[i], schema);
+    }
+}
+
+void forward_result::finalize(const forward_request& request) {
+    schema_ptr schema = local_schema_registry().get(request.cmd.schema_version);
+    for (size_t i = 0; i < query_results.size(); i++) {
+        query_results[i] = finalize_singular_result(query_results[i], request.reductions[i], schema);
     }
 }
 
@@ -521,4 +540,16 @@ std::optional<query::clustering_range> position_range_to_clustering_range(const 
     };
 
     return query::clustering_range{to_bound(r.start(), true), to_bound(r.end(), false)};
+}
+
+::shared_ptr<cql3::functions::function> query::forward_request::uda::get_function(schema_ptr& schema) {
+    if(!_function) {
+        std::vector<data_type> types;
+        for(auto& name: column_names) {
+            types.emplace_back(schema->get_column_definition(to_bytes(name))->type);
+        }
+
+        _function = cql3::functions::functions::find(cql3::functions::function_name{keyspace, uda_name}, types);
+    }
+    return _function;
 }

@@ -105,15 +105,13 @@ make_count_rows_function_expression() {
 }
 
 expr::expression
-make_function_expression(const sstring& keyspace, const sstring& name, const std::vector<sstring>& args) {
+make_function_expression(const ::shared_ptr<functions::function>& function, const std::vector<sstring>& args) {
     std::vector<expr::expression> args_expr;
     for (auto& a : args) {
         args_expr.emplace_back(expr::unresolved_identifier{make_shared<column_identifier_raw>(a, false)});
     }
 
-    return expr::function_call{
-            cql3::functions::function_name(keyspace, name),
-                    std::move(args_expr)};
+    return expr::function_call{function, std::move(args_expr)};
 }
 
 shared_ptr<selector::factory>
