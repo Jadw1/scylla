@@ -13,6 +13,7 @@
 #include <seastar/core/metrics.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 
+#include "seastar/core/scheduling.hh"
 #include "service/storage_proxy.hh"
 #include "service/migration_manager.hh"
 #include "service/forward_service.hh"
@@ -576,7 +577,7 @@ query_processor::execute_direct_without_checking_exception_message(const sstring
         if (!queryState.getClientState().isInternal)
             metrics.regularStatementsExecuted.inc();
 #endif
-    tracing::trace(query_state.get_trace_state(), "Processing a statement");
+    tracing::trace(query_state.get_trace_state(), "[SG: {}] Processing a statement", current_scheduling_group().name());
     return execute_maybe_with_guard(query_state, std::move(statement), options, &query_processor::do_execute_direct, std::move(warnings));
 }
 

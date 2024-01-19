@@ -14,6 +14,7 @@
 #include "partition_range_compat.hh"
 #include "db/consistency_level.hh"
 #include "db/commitlog/commitlog.hh"
+#include "seastar/core/scheduling.hh"
 #include "storage_proxy.hh"
 #include "unimplemented.hh"
 #include "mutation/mutation.hh"
@@ -303,14 +304,14 @@ public:
             const query::read_command& cmd, const dht::partition_range& pr,
             query::digest_algorithm digest_algo, db::per_partition_rate_limit::info rate_limit_info,
             fencing_token fence) {
-        tracing::trace(tr_state, "read_data: sending a message to /{}", addr.addr);
+        tracing::trace(tr_state, "[SG: {}] read_data: sending a message to /{}", current_scheduling_group().name(), addr.addr);
         auto&& [result, hit_rate, opt_exception] =
             co_await ser::storage_proxy_rpc_verbs::send_read_data(&_ms, addr, timeout, cmd, pr, digest_algo, rate_limit_info, fence);
         if (opt_exception.has_value() && *opt_exception) {
             co_await coroutine::return_exception_ptr((*opt_exception).into_exception_ptr());
         }
 
-        tracing::trace(tr_state, "read_data: got response from /{}", addr.addr);
+        tracing::trace(tr_state, "[SG: {}] read_data: got response from /{}", current_scheduling_group().name(), addr.addr);
         co_return rpc::tuple{make_foreign(::make_lw_shared<query::result>(std::move(result))), hit_rate.value_or(cache_temperature::invalid())};
     }
 
@@ -693,7 +694,7 @@ private:
         if (cmd1.trace_info) {
             trace_state_ptr = tracing::tracing::get_local_tracing_instance().create_session(*cmd1.trace_info);
             tracing::begin(trace_state_ptr);
-            tracing::trace(trace_state_ptr, "{}: message received from /{}", verb, src_addr.addr);
+            tracing::trace(trace_state_ptr, "[SG: {}] {}: message received from /{}", current_scheduling_group().name(), verb, src_addr.addr);
         }
         auto rate_limit_info = rate_limit_info_opt.value_or(std::monostate());
         if (!cmd1.max_result_size) {
@@ -751,7 +752,7 @@ private:
         }
 
         auto f = co_await coroutine::as_future(do_query());
-        tracing::trace(trace_state_ptr, "{} handling is done, sending a response to /{}", verb, src_ip);
+        tracing::trace(trace_state_ptr, "[SG: {}] {} handling is done, sending a response to /{}", current_scheduling_group().name(), verb, src_ip);
 
         if (auto stale = _sp.apply_fence(fence, src_ip)) {
             co_return co_await encode_replica_exception_for_rpc<Result>(p->features(), std::make_exception_ptr(std::move(*stale)));
@@ -4876,7 +4877,7 @@ protected:
         ++_proxy->get_stats().mutation_data_read_attempts.get_ep_stat(get_topology(), ep);
         auto fence = storage_proxy::get_fence(*_effective_replication_map_ptr);
         if (_proxy->is_me(ep)) {
-            tracing::trace(_trace_state, "read_mutation_data: querying locally");
+            tracing::trace(_trace_state, "[SG: {}] read_mutation_data: querying locally", current_scheduling_group().name());
             return _proxy->apply_fence(_proxy->query_mutations_locally(_schema, cmd, _partition_range, timeout, _trace_state), fence, _proxy->my_address());
         } else {
             return _proxy->remote().send_read_mutation_data(netw::messaging_service::msg_addr{ep, 0}, timeout,
@@ -4891,7 +4892,7 @@ protected:
                   : query::result_options{query::result_request::only_result, query::digest_algorithm::none};
         auto fence = storage_proxy::get_fence(*_effective_replication_map_ptr);
         if (_proxy->is_me(ep)) {
-            tracing::trace(_trace_state, "read_data: querying locally");
+            tracing::trace(_trace_state, "[SG: {}] read_data: querying locally", current_scheduling_group().name());
             return _proxy->apply_fence(_proxy->query_result_local(_effective_replication_map_ptr, _schema, _cmd, _partition_range, opts, _trace_state, timeout, adjust_rate_limit_for_local_operation(_rate_limit_info)), fence, _proxy->my_address());
         } else {
             return _proxy->remote().send_read_data(netw::messaging_service::msg_addr{ep, 0}, timeout,
@@ -4903,11 +4904,11 @@ protected:
         ++_proxy->get_stats().digest_read_attempts.get_ep_stat(get_topology(), ep);
         auto fence = storage_proxy::get_fence(*_effective_replication_map_ptr);
         if (_proxy->is_me(ep)) {
-            tracing::trace(_trace_state, "read_digest: querying locally");
+            tracing::trace(_trace_state, "[SG: {}] read_digest: querying locally", current_scheduling_group().name());
             return _proxy->apply_fence(_proxy->query_result_local_digest(_effective_replication_map_ptr, _schema, _cmd, _partition_range, _trace_state,
                         timeout, digest_algorithm(*_proxy), adjust_rate_limit_for_local_operation(_rate_limit_info)), fence, _proxy->my_address());
         } else {
-            tracing::trace(_trace_state, "read_digest: sending a message to /{}", ep);
+            tracing::trace(_trace_state, "[SG: {}] read_digest: sending a message to /{}", current_scheduling_group().name(), ep);
             return _proxy->remote().send_read_digest(netw::messaging_service::msg_addr{ep, 0}, timeout,
                 _trace_state, *_cmd, _partition_range, digest_algorithm(*_proxy), _rate_limit_info,
                 fence);
@@ -5441,7 +5442,7 @@ storage_proxy::query_result_local(locator::effective_replication_map_ptr erm, sc
         get_stats().replica_cross_shard_ops += shard != this_shard_id();
         return _db.invoke_on(shard, _read_smp_service_group, [gs = global_schema_ptr(s), prv = dht::partition_range_vector({pr}) /* FIXME: pr is copied */, cmd, opts, timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state)), rate_limit_info] (replica::database& db) mutable {
             auto trace_state = gt.get();
-            tracing::trace(trace_state, "Start querying singular range {}", prv.front());
+            tracing::trace(trace_state, "[SG: {}] Start querying singular range {}", current_scheduling_group().name(), prv.front());
             return db.query(gs, *cmd, opts, prv, trace_state, timeout, rate_limit_info).then([trace_state](std::tuple<lw_shared_ptr<query::result>, cache_temperature>&& f_ht) {
                 auto&& [f, ht] = f_ht;
                 tracing::trace(trace_state, "Querying is done");
@@ -5450,7 +5451,7 @@ storage_proxy::query_result_local(locator::effective_replication_map_ptr erm, sc
         });
     } else {
         // FIXME: adjust multishard_mutation_query to accept an smp_service_group and propagate it there
-        tracing::trace(trace_state, "Start querying token range {}", pr);
+        tracing::trace(trace_state, "[SG: {}] Start querying token range {}", current_scheduling_group().name(), pr);
         return query_nonsingular_data_locally(s, cmd, {pr}, opts, trace_state, timeout).then(
                 [trace_state = std::move(trace_state)] (rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>&& r_ht) {
             auto&& [r, ht] = r_ht;

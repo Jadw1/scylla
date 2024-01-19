@@ -25,6 +25,7 @@
 #include "cache_flat_mutation_reader.hh"
 #include "partition_snapshot_reader.hh"
 #include "clustering_key_filter.hh"
+#include "seastar/core/scheduling.hh"
 #include "utils/updateable_value.hh"
 
 namespace cache {
@@ -782,8 +783,8 @@ row_cache::make_reader_opt(schema_ptr s,
     };
 
     if (query::is_single_partition(range) && !fwd_mr) {
-        tracing::trace(trace_state, "Querying cache for range {} and slice {}",
-                range, seastar::value_of([&slice] { return slice.get_all_ranges(); }));
+        tracing::trace(trace_state, "[SG: {}] Querying cache for range {} and slice {}",
+                current_scheduling_group().name(), range, seastar::value_of([&slice] { return slice.get_all_ranges(); }));
         auto mr = _read_section(_tracker.region(), [&] () -> flat_mutation_reader_v2_opt {
             dht::ring_position_comparator cmp(*_schema);
             auto&& pos = range.start()->value();
@@ -810,8 +811,8 @@ row_cache::make_reader_opt(schema_ptr s,
         }
     }
 
-    tracing::trace(trace_state, "Scanning cache for range {} and slice {}",
-                   range, seastar::value_of([&slice] { return slice.get_all_ranges(); }));
+    tracing::trace(trace_state, "[SG: {}] Scanning cache for range {} and slice {}",
+                   current_scheduling_group().name(), range, seastar::value_of([&slice] { return slice.get_all_ranges(); }));
     auto mr = make_scanning_reader(range, make_context());
     if (fwd == streamed_mutation::forwarding::yes) {
         return make_forwardable(std::move(mr));
@@ -840,7 +841,7 @@ flat_mutation_reader_v2 row_cache::make_nonpopulating_reader(schema_ptr schema, 
         if (hint.match) {
             cache_entry& e = *i;
             upgrade_entry(e);
-            tracing::trace(ts, "Reading partition {} from cache", pos);
+            tracing::trace(ts, "[SG: {}] Reading partition {} from cache", current_scheduling_group().name(), pos);
             return make_partition_snapshot_flat_reader<false, dummy_accounter>(
                     schema,
                     std::move(permit),
