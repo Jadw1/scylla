@@ -42,8 +42,6 @@ protected:
 
     schema_altering_statement(cf_name name, timeout_config_selector timeout_selector = &timeout_config::other_timeout);
 
-    virtual bool needs_guard(query_processor& qp) const override;
-
     /**
      * When a new data_dictionary::database object (keyspace, table) is created, the creator needs to be granted all applicable
      * permissions on it.
@@ -63,6 +61,8 @@ protected:
 
 public:
     virtual future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, std::vector<mutation>, cql3::cql_warnings_vec>> prepare_schema_mutations(query_processor& qp, api::timestamp_type) const = 0;
+    
+    virtual bool needs_guard(query_processor& qp, service::query_state& state) const override;
 };
 
 }
