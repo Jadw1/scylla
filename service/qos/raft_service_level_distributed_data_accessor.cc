@@ -46,7 +46,7 @@ future<qos::service_levels_info> raft_service_level_distributed_data_accessor::g
     return qos::get_service_level(_qp, db::system_keyspace::NAME, db::system_keyspace::SERVICE_LEVELS_V2, std::move(service_level_name), db::consistency_level::LOCAL_ONE);
 }
 
-future<> raft_service_level_distributed_data_accessor::do_raft_command(std::optional<service::group0_guard> guard, std::function<future<std::vector<mutation>>(api::timestamp_type)> mutation_function, std::string_view description) const {
+future<> raft_service_level_distributed_data_accessor::do_raft_command(std::optional<service::group0_guard> guard, abort_source* as, std::function<future<std::vector<mutation>>(api::timestamp_type)> mutation_function, std::string_view description) const {
     if (this_shard_id() != 0) {
         on_internal_error(logger, "raft_service_level_distributed_data_accessor: must be executed on shard 0");
     }
@@ -55,8 +55,6 @@ future<> raft_service_level_distributed_data_accessor::do_raft_command(std::opti
         on_internal_error(logger, "raft_service_level_distributed_data_accessor: guard must be present");
     }
     
-    //NOTE: abort_source here is temporary. It's fixed and passed as an argument in a later commit
-    abort_source as;
     auto timestamp = guard->write_timestamp();
 
     auto muts = co_await mutation_function(timestamp);
@@ -65,11 +63,11 @@ future<> raft_service_level_distributed_data_accessor::do_raft_command(std::opti
     };
 
     auto group0_cmd = _group0_client.prepare_command(change, *guard, description);
-    co_await _group0_client.add_entry(std::move(group0_cmd), std::move(*guard), &as);
+    co_await _group0_client.add_entry(std::move(group0_cmd), std::move(*guard), as);
 }
 
-future<> raft_service_level_distributed_data_accessor::set_service_level(sstring service_level_name, qos::service_level_options slo, std::optional<service::group0_guard> guard) const {
-    co_await do_raft_command(std::move(guard), [this, service_level_name = std::move(service_level_name), slo = std::move(slo)] (api::timestamp_type timestamp) -> future<std::vector<mutation>> {
+future<> raft_service_level_distributed_data_accessor::set_service_level(sstring service_level_name, qos::service_level_options slo, std::optional<service::group0_guard> guard, abort_source* as) const {
+    co_await do_raft_command(std::move(guard), as, [this, service_level_name = std::move(service_level_name), slo = std::move(slo)] (api::timestamp_type timestamp) -> future<std::vector<mutation>> {
         static sstring insert_query = format("INSERT INTO {}.{} (service_level, timeout, workload_type) VALUES (?, ?, ?);", db::system_keyspace::NAME, db::system_keyspace::SERVICE_LEVELS_V2);
         data_value workload = slo.workload == qos::service_level_options::workload_type::unspecified
                 ? data_value::make_null(utf8_type)
@@ -79,14 +77,13 @@ future<> raft_service_level_distributed_data_accessor::set_service_level(sstring
     }, "set service level");
 }
 
-future<> raft_service_level_distributed_data_accessor::drop_service_level(sstring service_level_name, std::optional<service::group0_guard> guard) const {
+future<> raft_service_level_distributed_data_accessor::drop_service_level(sstring service_level_name, std::optional<service::group0_guard> guard, abort_source* as) const {
     //FIXME: remove this when `role_manager::remove_attribute()` will be done in one raft command
     if (!guard) {
-        abort_source as;
-        guard = co_await _group0_client.start_operation(&as);
+        guard = co_await _group0_client.start_operation(as);
     }
 
-    co_await do_raft_command(std::move(guard), [this, service_level_name = std::move(service_level_name)] (api::timestamp_type timestamp) -> future<std::vector<mutation>> {
+    co_await do_raft_command(std::move(guard), as, [this, service_level_name = std::move(service_level_name)] (api::timestamp_type timestamp) -> future<std::vector<mutation>> {
         static sstring delete_query = format("DELETE FROM {}.{} WHERE service_level= ?;", db::system_keyspace::NAME, db::system_keyspace::SERVICE_LEVELS_V2);
         co_return co_await _qp.get_mutations_internal(delete_query, qos_query_state(), timestamp, {service_level_name});
     }, "drop service level");
