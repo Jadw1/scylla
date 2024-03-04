@@ -17,6 +17,7 @@
 #include "raft/raft.hh"
 #include "gms/inet_address.hh"
 #include "service/endpoint_lifecycle_subscriber.hh"
+#include "service/qos/service_level_controller.hh"
 #include "service/topology_state_machine.hh"
 
 namespace db {
@@ -72,6 +73,7 @@ future<> run_topology_coordinator(
         raft_topology_cmd_handler_type raft_topology_cmd_handler,
         tablet_allocator& tablet_allocator,
         std::chrono::milliseconds ring_delay,
+        qos::service_level_controller& sl_controller,
         endpoint_lifecycle_notifier& lifecycle_notifier);
 
 }
