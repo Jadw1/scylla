@@ -2127,8 +2127,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
     future<> start_tablet_load_stats_refresher();
 
     // Precondition: the state machine upgrade state is not at upgrade_state::done.
-    future<> do_upgrade_step(group0_guard);
-    future<> build_coordinator_state(group0_guard);
+    future<> do_upgrade_step(qos::service_level_controller&, group0_guard);
+    future<> build_coordinator_state(qos::service_level_controller&, group0_guard);
 
     future<> await_event() {
         _as.check();
@@ -2160,7 +2160,7 @@ public:
     {}
 
     // Returns true if the upgrade was done, returns false if upgrade was interrupted.
-    future<bool> maybe_run_upgrade();
+    future<bool> maybe_run_upgrade(qos::service_level_controller& sl_controller);
     future<> run();
 
     virtual void on_join_cluster(const gms::inet_address& endpoint) {}
@@ -2301,14 +2301,14 @@ future<> topology_coordinator::start_tablet_load_stats_refresher() {
     }
 }
 
-future<> topology_coordinator::do_upgrade_step(group0_guard guard) {
+future<> topology_coordinator::do_upgrade_step(qos::service_level_controller& sl_controller, group0_guard guard) {
     switch (_topo_sm._topology.upgrade_state) {
     case topology::upgrade_state_type::not_upgraded:
         on_internal_error(rtlogger, std::make_exception_ptr(std::runtime_error(
                 "topology_coordinator was started even though upgrade to raft topology was not requested yet")));
 
     case topology::upgrade_state_type::build_coordinator_state:
-        co_await build_coordinator_state(std::move(guard));
+        co_await build_coordinator_state(sl_controller, std::move(guard));
         co_return;
 
     case topology::upgrade_state_type::done:
@@ -2317,7 +2317,7 @@ future<> topology_coordinator::do_upgrade_step(group0_guard guard) {
     }
 }
 
-future<> topology_coordinator::build_coordinator_state(group0_guard guard) {
+future<> topology_coordinator::build_coordinator_state(qos::service_level_controller& sl_controller, group0_guard guard) {
     // Wait until all nodes reach use_post_raft_procedures
     rtlogger.info("waiting for all nodes to finish upgrade to raft schema");
     release_guard(std::move(guard));
@@ -2326,6 +2326,9 @@ future<> topology_coordinator::build_coordinator_state(group0_guard guard) {
     rtlogger.info("migrating system_auth keyspace data");
     co_await auth::migrate_to_auth_v2(_sys_ks.query_processor(), _group0.client(),
             [this] (abort_source*) { return start_operation();}, _as);
+
+    rtlogger.info("migrating service levels data");
+    co_await sl_controller.migrate_to_v2(_gossiper.num_endpoints(), _sys_ks.query_processor(), _group0.client(), _as);
 
     rtlogger.info("building initial raft topology state and CDC generation");
     guard = co_await start_operation();
@@ -2543,7 +2546,7 @@ bool topology_coordinator::handle_topology_coordinator_error(std::exception_ptr 
     return false;
 }
 
-future<bool> topology_coordinator::maybe_run_upgrade() {
+future<bool> topology_coordinator::maybe_run_upgrade(qos::service_level_controller& sl_controller) {
     if (_topo_sm._topology.upgrade_state == topology::upgrade_state_type::done) {
         // Upgrade was already done, nothing to do
         co_return true;
@@ -2559,7 +2562,7 @@ future<bool> topology_coordinator::maybe_run_upgrade() {
         bool sleep = false;
         try {
             auto guard = co_await start_operation();
-            co_await do_upgrade_step(std::move(guard));
+            co_await do_upgrade_step(sl_controller, std::move(guard));
         } catch (...) {
             sleep = handle_topology_coordinator_error(std::current_exception());
         }
@@ -2632,6 +2635,7 @@ future<> run_topology_coordinator(
         raft_topology_cmd_handler_type raft_topology_cmd_handler,
         tablet_allocator& tablet_allocator,
         std::chrono::milliseconds ring_delay,
+        qos::service_level_controller& sl_controller,
         endpoint_lifecycle_notifier& lifecycle_notifier) {
 
     topology_coordinator coordinator{
@@ -2645,7 +2649,7 @@ future<> run_topology_coordinator(
     lifecycle_notifier.register_subscriber(&coordinator);
     try {
         rtlogger.info("start topology coordinator fiber");
-        const bool upgrade_done = co_await coordinator.maybe_run_upgrade();
+        const bool upgrade_done = co_await coordinator.maybe_run_upgrade(sl_controller);
         if (upgrade_done) {
             co_await coordinator.run();
         }
