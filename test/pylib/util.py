@@ -158,3 +158,13 @@ async def get_enabled_features(cql: Session, host: Host) -> set[str]:
     """Returns a set of cluster features that a node considers to be enabled."""
     rs = await cql.run_async(f"SELECT value FROM system.scylla_local WHERE key = 'enabled_features'", host=host)
     return set(rs[0].value.split(","))
+
+async def trigger_snapshot(manager, server: ServerInfo) -> None:
+    from test.pylib.manager_client import ManagerClient
+    
+    cql = manager.get_cql()
+    group0_id = (await cql.run_async(
+        "select value from system.scylla_local where key = 'raft_group0_id'"))[0].value
+
+    host = cql.cluster.metadata.get_host(server.ip_addr)
+    await manager.api.client.post(f"/raft/trigger_snapshot/{group0_id}", host=server.ip_addr)
