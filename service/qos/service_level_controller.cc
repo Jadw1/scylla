@@ -6,15 +6,18 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <optional>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 #include "seastar/core/on_internal_error.hh"
 #include "seastar/core/timer.hh"
+#include "service/raft/raft_group0_client.hh"
 #include "service_level_controller.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "cql3/query_processor.hh"
 #include "service/storage_proxy.hh"
+#include "timestamp.hh"
 
 namespace qos {
 static logging::logger sl_logger("service_level_controller");
@@ -339,6 +342,11 @@ future<> service_level_controller::drop_distributed_service_level(sstring name, 
         auto& role_manager = _auth_service.local().underlying_role_manager();
         auto attributes = co_await role_manager.query_attribute_for_all("service_level");
         //FIXME: use the same group0 operation to remove attribute
+        if (guard) {
+            service::release_guard(std::move(*guard));
+            guard = std::nullopt;
+        }
+
         co_await coroutine::parallel_for_each(attributes.begin(), attributes.end(), [&role_manager, name] (auto&& attr) {
             if (attr.second == name) {
                 return do_with(attr.first, [&role_manager] (const sstring& role_name) {
