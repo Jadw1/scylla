@@ -1790,6 +1790,12 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
              */
             db.local().enable_autocompaction_toggle();
 
+            sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
+                controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                        ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
+                lifecycle_notifier.local().register_subscriber(&controller);
+            }).get();
+
             group0_service.start().get();
             auto stop_group0_service = defer_verbose_shutdown("group 0 service", [&group0_service] {
                 sl_controller.local().abort_group0_operations();
@@ -1824,12 +1830,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
                 return ss.local().join_cluster(sys_dist_ks, proxy, gossiper, service::start_hint_manager::yes, generation_number);
-            }).get();
-
-            sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
-                controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
-                        ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
-                lifecycle_notifier.local().register_subscriber(&controller);
             }).get();
 
             supervisor::notify("starting tracing");
