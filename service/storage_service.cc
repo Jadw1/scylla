@@ -1183,6 +1183,27 @@ future<> storage_service::raft_initialize_discovery_leader(raft::server& raft_se
             rtlogger.info("bootstrap: concurrent operation is detected, retrying.");
         }
     }
+
+    bool mark_sl = true;
+    while (mark_sl) {
+        auto sl_status = co_await _sys_ks.local().get_service_levels_migration_status();
+        if (sl_status) {
+            mark_sl = true;
+            break;
+        }
+
+        auto guard = co_await _group0->client().start_operation(&_group0_as);
+        auto mut = _sys_ks.local().make_service_levels_migration_status_mutation(guard);
+        write_mutations change {
+            .mutations{canonical_mutation(mut)}
+        };
+        auto group0_cmd = _group0->client().prepare_command(std::move(change), guard, "bootstrap: mark service levels migrated");
+        try {
+            co_await _group0->client().add_entry(std::move(group0_cmd), std::move(guard), &_group0_as);
+        } catch (group0_concurrent_modification&) {
+            rtlogger.info("bootstrap: concurrent operation is detected, retrying.");
+        }
+    }
 }
 
 future<> storage_service::update_topology_with_local_metadata(raft::server& raft_server) {
@@ -6273,6 +6294,11 @@ void storage_service::init_messaging_service(bool raft_topology_change_enabled) 
                     auto muts = co_await ss.get_system_mutations(schema);
                     mutations.reserve(mutations.size() + muts.size());
                     std::move(muts.begin(), muts.end(), std::back_inserter(mutations));
+                }
+
+                auto sl_status = co_await ss._sys_ks.local().get_service_levels_migration_status_mutation();
+                if (sl_status) {
+                    mutations.push_back(canonical_mutation(*sl_status));
                 }
 
                 co_return raft_snapshot{

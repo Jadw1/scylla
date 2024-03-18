@@ -441,7 +441,7 @@ void service_level_controller::upgrade_to_v2(cql3::query_processor& qp, service:
     }
 }
 
-future<> service_level_controller::migrate_to_v2(size_t nodes_count, cql3::query_processor& qp, service::raft_group0_client& group0_client, abort_source& as) {
+future<> service_level_controller::migrate_to_v2(size_t nodes_count, db::system_keyspace& sys_ks, cql3::query_processor& qp, service::raft_group0_client& group0_client, abort_source& as) {
     //TODO:
     //Now we trust the administrator to not make changes to service levels during the migration.
     //Ideally, during the migration we should set migration data accessor(on all nodes, on all shards) that allows to read but forbids writes
@@ -508,6 +508,9 @@ future<> service_level_controller::migrate_to_v2(size_t nodes_count, cql3::query
         }
         migration_muts.push_back(std::move(muts[0]));
     }
+
+    migration_muts.emplace_back(sys_ks.make_service_levels_migration_status_mutation(guard));
+
     service::write_mutations change {
         .mutations{migration_muts.begin(), migration_muts.end()},
     };

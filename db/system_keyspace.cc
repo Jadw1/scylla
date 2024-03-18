@@ -45,6 +45,7 @@
 #include "replica/tablets.hh"
 #include "replica/query.hh"
 #include "types/types.hh"
+#include "service/raft/raft_group0_client.hh"
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
 
@@ -2645,13 +2646,13 @@ future<mutation> system_keyspace::get_group0_history(distributed<replica::databa
     co_return mutation(s, partition_key::from_singular(*s, GROUP0_HISTORY_KEY));
 }
 
-future<std::optional<mutation>> system_keyspace::get_group0_schema_version() {
-    auto s = _db.find_schema(db::system_keyspace::NAME, db::system_keyspace::SCYLLA_LOCAL);
+static future<std::optional<mutation>> get_scylla_local_mutation(replica::database& db, std::string_view key) {
+    auto s = db.find_schema(db::system_keyspace::NAME, db::system_keyspace::SCYLLA_LOCAL);
 
-    partition_key pk = partition_key::from_singular(*s, "group0_schema_version");
+    partition_key pk = partition_key::from_singular(*s, key);
     dht::partition_range pr = dht::partition_range::make_singular(dht::decorate_key(*s, pk));
 
-    auto rs = co_await replica::query_mutations(_db.container(), s, pr, s->full_slice(), db::no_timeout);
+    auto rs = co_await replica::query_mutations(db.container(), s, pr, s->full_slice(), db::no_timeout);
     assert(rs);
     auto& ps = rs->partitions();
     for (auto& p: ps) {
@@ -2660,6 +2661,31 @@ future<std::optional<mutation>> system_keyspace::get_group0_schema_version() {
     }
 
     co_return std::nullopt;
+}
+
+future<std::optional<mutation>> system_keyspace::get_group0_schema_version() {
+    return get_scylla_local_mutation(_db, "group0_schema_version");
+}
+
+static constexpr auto SERVICE_LEVELS_STATUS_KEY = "service_level_v2_status";
+
+future<std::optional<mutation>> system_keyspace::get_service_levels_migration_status_mutation() {
+    return get_scylla_local_mutation(_db, SERVICE_LEVELS_STATUS_KEY);
+}
+
+mutation system_keyspace::make_service_levels_migration_status_mutation(const service::group0_guard& guard) {
+    auto s = _db.find_schema(db::system_keyspace::NAME, db::system_keyspace::SCYLLA_LOCAL);
+    auto* cdef = s->get_column_definition("value");
+    assert(cdef);
+
+    mutation m(s, partition_key::from_singular(*s, SERVICE_LEVELS_STATUS_KEY));
+    auto cell = atomic_cell::make_live(*cdef->type, guard.write_timestamp(), cdef->type->decompose(SERVICE_LEVELS_MIGRATED_VALUE));
+    m.set_clustered_cell(clustering_key::make_empty(), *cdef, std::move(cell));
+    return m;
+}
+
+future<std::optional<sstring>> system_keyspace::get_service_levels_migration_status() {
+    return get_scylla_local_param_as<sstring>(SERVICE_LEVELS_STATUS_KEY);
 }
 
 static constexpr auto GROUP0_UPGRADE_STATE_KEY = "group0_upgrade_state";

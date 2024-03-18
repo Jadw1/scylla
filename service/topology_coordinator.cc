@@ -2392,7 +2392,7 @@ future<> topology_coordinator::build_coordinator_state(qos::service_level_contro
             [this] (abort_source*) { return start_operation();}, _as);
 
     rtlogger.info("migrating service levels data");
-    co_await sl_controller.migrate_to_v2(_gossiper.num_endpoints(), _sys_ks.query_processor(), _group0.client(), _as);
+    co_await sl_controller.migrate_to_v2(_gossiper.num_endpoints(), _sys_ks, _sys_ks.query_processor(), _group0.client(), _as);
 
     rtlogger.info("building initial raft topology state and CDC generation");
     guard = co_await start_operation();

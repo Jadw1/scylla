@@ -45,6 +45,8 @@ namespace paxos {
 } // namespace service::paxos
 
 struct topology_request_state;
+
+class group0_guard;
 }
 
 namespace netw {
@@ -586,6 +588,15 @@ public:
     future<> set_must_synchronize_topology(bool);
 
     future<service::topology_request_state> get_topology_request_state(utils::UUID id);
+
+public:
+    static constexpr auto SERVICE_LEVELS_MIGRATED_VALUE = "data_migrated";
+
+    future<std::optional<sstring>> get_service_levels_migration_status();
+    
+    mutation make_service_levels_migration_status_mutation(const service::group0_guard& guard);
+    future<std::optional<mutation>> get_service_levels_migration_status_mutation();
+
 private:
     static std::optional<service::topology_features> decode_topology_features_state(::shared_ptr<cql3::untyped_result_set> rs);
 
