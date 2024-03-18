@@ -17,6 +17,7 @@
 #include "auth/allow_all_authorizer.hh"
 #include "auth/maintenance_socket_role_manager.hh"
 #include "seastar/core/timer.hh"
+#include "service/qos/raft_service_level_distributed_data_accessor.hh"
 #include "tasks/task_manager.hh"
 #include "utils/build_id.hh"
 #include "supervisor.hh"
@@ -1790,9 +1791,16 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
              */
             db.local().enable_autocompaction_toggle();
 
-            sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
-                controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
-                        ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
+            auto sl_migration_status = sys_ks.local().get_service_levels_migration_status().get0();
+            sl_controller.invoke_on_all([migration_status = std::move(sl_migration_status), &qp, &group0_client, &lifecycle_notifier] (qos::service_level_controller& controller) {
+                if (migration_status && *migration_status == db::system_keyspace::SERVICE_LEVELS_MIGRATED_VALUE) {
+                    controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                            ::make_shared<qos::raft_service_level_distributed_data_accessor>(qp.local(), group0_client)));
+                } else {
+                    controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                            ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
+                }
+
                 lifecycle_notifier.local().register_subscriber(&controller);
             }).get();
 
