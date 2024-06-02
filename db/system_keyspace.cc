@@ -1145,6 +1145,19 @@ schema_ptr system_keyspace::service_levels_v2() {
     return schema;
 }
 
+schema_ptr system_keyspace::aggregate_results() {
+    static thread_local auto schema = [] {
+        auto id = generate_legacy_id(NAME, AGGREGATE_RESULTS);
+        return schema_builder(NAME, AGGREGATE_RESULTS, id)
+            .with_column("aggregation_id", utf8_type, column_kind::partition_key)
+            .with_column("group", utf8_type, column_kind::clustering_key)
+            .with_column("value", bytes_type)
+            .with_version(db::system_keyspace::generate_schema_version(id))
+            .build();
+    }();
+    return schema;
+}
+
 schema_ptr system_keyspace::roles() {
     static thread_local auto schema = [] {
         schema_builder builder(generate_legacy_id(NAME, ROLES), NAME, ROLES,

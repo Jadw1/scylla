@@ -133,6 +133,7 @@ class system_keyspace : public seastar::peering_sharded_service<system_keyspace>
     static schema_ptr large_rows();
     static schema_ptr large_cells();
     static schema_ptr scylla_local();
+    static schema_ptr aggregate_results();
     future<> force_blocking_flush(sstring cfname);
     // This function is called when the system.peers table is read,
     // and it fixes some types of inconsistencies that can occur
@@ -178,6 +179,7 @@ public:
     static constexpr auto CDC_GENERATIONS_V3 = "cdc_generations_v3";
     static constexpr auto TABLETS = "tablets";
     static constexpr auto SERVICE_LEVELS_V2 = "service_levels_v2";
+    static constexpr auto AGGREGATE_RESULTS = "aggregate_results";
 
     // auth
     static constexpr auto ROLES = "roles";
