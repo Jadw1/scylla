@@ -39,6 +39,7 @@ struct forward_request {
     lowres_system_clock::time_point timeout;
 
     std::optional<std::vector<query::forward_request::aggregation_info>> aggregation_infos [[version 5.1]];
+    std::optional<std::vector<size_t>>  group_by_cell_indices [[version 5.5]];
 };
 
 struct forward_result {

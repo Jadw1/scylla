@@ -498,6 +498,7 @@ struct forward_request {
     db::consistency_level cl;
     lowres_system_clock::time_point timeout;
     std::optional<std::vector<aggregation_info>> aggregation_infos;
+    std::optional<std::vector<size_t>> group_by_cell_indices;
 };
 
 std::ostream& operator<<(std::ostream& out, const forward_request& r);

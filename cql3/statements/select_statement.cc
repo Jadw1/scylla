@@ -1625,6 +1625,7 @@ parallelized_select_statement::do_execute(
     auto timeout_duration = get_timeout(state.get_client_state(), options);
     auto timeout = lowres_system_clock::now() + timeout_duration;
     auto reductions = _selection->get_reductions();
+    auto group_by_cells = (_group_by_cell_indices) ? *_group_by_cell_indices : std::vector<size_t>();
 
     query::forward_request req = {
         .reduction_types = reductions.types,
@@ -1633,6 +1634,7 @@ parallelized_select_statement::do_execute(
         .cl = options.get_consistency(),
         .timeout = timeout,
         .aggregation_infos = reductions.infos,
+        .group_by_cell_indices = std::move(group_by_cells),
     };
 
     // dispatch execution of this statement to other nodes

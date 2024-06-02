@@ -442,10 +442,11 @@ future<query::forward_result> forward_service::execute_on_this_shard(
         cql3::query_options::specific_options::DEFAULT
     );
 
+    auto group_by_cells = (req.group_by_cell_indices) ? *req.group_by_cell_indices : std::vector<size_t>();
     auto rs_builder = cql3::selection::result_set_builder(
         *selection,
         now,
-        std::vector<size_t>() // Represents empty GROUP BY indices.
+        group_by_cells
     );
 
     // We serve up to 256 ranges at a time to avoid allocating a huge vector for ranges
