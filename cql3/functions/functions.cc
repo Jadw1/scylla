@@ -7,6 +7,7 @@
  */
 
 #include "functions.hh"
+#include "cql3/functions/first_function.hh"
 #include "token_fct.hh"
 #include "cql3/ut_name.hh"
 #include "cql3/type_json.hh"
@@ -235,6 +236,7 @@ static shared_ptr<function> get_dynamic_aggregate(const function_name &name, con
     static const function_name MAX_NAME = function_name::native_function("max");
     static const function_name COUNT_NAME = function_name::native_function("count");
     static const function_name COUNT_ROWS_NAME = function_name::native_function("countRows");
+    static const function_name FIRST_NAME = aggregate_fcts::first_function_name();
 
     auto get_arguments = [&] (const sstring& function_name) {
         return std::visit(overloaded_functor {
@@ -300,7 +302,16 @@ static shared_ptr<function> get_dynamic_aggregate(const function_name &name, con
         if (arg->is_collection() || arg->is_tuple() || arg->is_user_type()) {
             return aggregate_fcts::make_count_rows_function();
         }
-    } 
+    } else if (name.has_keyspace()
+                ? name == FIRST_NAME
+                : name.name == FIRST_NAME.name) {
+        auto arg_types = get_arguments(FIRST_NAME.name);
+        if (arg_types.size() != 1) {
+            throw std::runtime_error("$$first$$() function requires only 1 argument");
+        }
+
+        return aggregate_fcts::make_first_function(arg_types[0]);
+    }
     return {};
 }
 
