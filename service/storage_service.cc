@@ -872,9 +872,9 @@ future<> storage_service::merge_topology_snapshot(raft_snapshot snp) {
     co_await _db.local().apply(freeze(muts), db::no_timeout);
 }
 
-future<> storage_service::update_service_levels_cache() {
+future<> storage_service::update_service_levels_cache(qos::update_only_effective_cache update_only_effective_cache) {
     assert(this_shard_id() == 0);
-    co_await _sl_controller.local().update_service_levels_cache();
+    co_await _sl_controller.local().update_cache(update_only_effective_cache);
 }
 
 // Moves the coroutine lambda onto the heap and extends its
