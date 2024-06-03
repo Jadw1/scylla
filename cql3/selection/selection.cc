@@ -15,6 +15,7 @@
 #include <boost/algorithm/cxx11/all_of.hpp>
 
 #include "cql3/selection/selection.hh"
+#include "cql3/expr/expression.hh"
 #include "cql3/selection/raw_selector.hh"
 #include "cql3/result_set.hh"
 #include "cql3/query_options.hh"
@@ -23,6 +24,7 @@
 #include "cql3/expr/expr-utils.hh"
 #include "cql3/functions/first_function.hh"
 #include "cql3/functions/aggregate_fcts.hh"
+#include "utils/overloaded_functor.hh"
 
 namespace cql3 {
 
@@ -190,6 +192,8 @@ contains_ttl(const expr::expression& e) {
     return contains_column_mutation_attribute(expr::column_mutation_attribute::attribute_kind::ttl, e);
 }
 
+#include "utils/overloaded_functor.hh"
+
 class selection_with_processing : public selection {
 private:
     std::vector<expr::expression> _selectors;
@@ -209,6 +213,44 @@ public:
         _outer_loop = std::move(agg_split.outer_loop);
         _inner_loop = std::move(agg_split.inner_loop);
         _initial_values_for_temporaries = std::move(agg_split.initial_values_for_temporaries);
+    }
+
+    virtual void lol() override {
+        auto visitor = overloaded_functor {
+            [] (const expr::column_value&) { return "column_value"; },
+            [] (const expr::unresolved_identifier&) { return "unresolved_identifier"; },
+            [] (const expr::function_call&) { return "function_call"; },
+            [] (const expr::cast&) { return "cast"; },
+            [] (const expr::field_selection&) { return "field_selection"; },
+            [] (const expr::bind_variable&) { return "bind_variable"; },
+            [] (const expr::temporary&) { return "temporary"; },
+            [] (const auto&) { return ""; }
+        };
+
+        std::cout << "***SELECTION***\n";
+        std::cout << "selectors size: " << _selectors.size() << "\n";
+        std::cout << "inner loop size: " << _inner_loop.size() << "\n";
+        std::cout << "outer loop size: " << _outer_loop.size() << "\n";
+        std::cout << "\n";
+
+        std::cout << "selectors:\n";
+        for (auto& e: _selectors) {
+            std::cout << "- " << fmt::format("{}", e) << " | " << expr::visit(visitor, e);
+            std::cout << "\n";
+        }
+        std::cout << "\n";
+
+        std::cout << "inner loop:\n";
+        for (auto& e: _inner_loop) {
+            std::cout << "- " << fmt::format("{}", e) << "\n";
+        }
+        std::cout << "\n";
+
+        std::cout << "outer loop:\n";
+        for (auto& e: _outer_loop) {
+            std::cout << "- " << fmt::format("{}", e) << "\n";
+        }
+        std::cout << "\n";
     }
 
     virtual uint32_t add_column_for_post_processing(const column_definition& c) override {
@@ -286,33 +328,34 @@ public:
         };
         for (const auto& e : _selectors) {
             auto fc = expr::as_if<expr::function_call>(&e);
-            if (!fc) {
-                bad();
-            }
-            auto func = std::get<shared_ptr<cql3::functions::function>>(fc->func);
-            if (!func->is_aggregate()) {
-                bad();
-            }
-            auto agg_func = dynamic_pointer_cast<functions::aggregate_function>(std::move(func));
-
-            auto type = (agg_func->name().name == "countRows") ? query::forward_request::reduction_type::count : query::forward_request::reduction_type::aggregate;
-
-            std::vector<sstring> column_names;
-            for (auto& arg : fc->args) {
-                auto col = expr::as_if<expr::column_value>(&arg);
-                if (!col) {
+            if (fc) {
+                auto func = std::get<shared_ptr<cql3::functions::function>>(fc->func);
+                if (!func->is_aggregate()) {
                     bad();
                 }
-                column_names.push_back(col->col->name_as_text());
+                auto agg_func = dynamic_pointer_cast<functions::aggregate_function>(std::move(func));
+
+                auto type = (agg_func->name().name == "countRows") ? query::forward_request::reduction_type::count : query::forward_request::reduction_type::aggregate;
+
+                std::vector<sstring> column_names;
+                for (auto& arg : fc->args) {
+                    auto col = expr::as_if<expr::column_value>(&arg);
+                    if (!col) {
+                        bad();
+                    }
+                    column_names.push_back(col->col->name_as_text());
+                }
+
+                auto info = query::forward_request::aggregation_info {
+                    .name = agg_func->name(),
+                    .column_names = std::move(column_names),
+                };
+
+                types.push_back(type);
+                infos.push_back(std::move(info));
+            } else {
+
             }
-
-            auto info = query::forward_request::aggregation_info {
-                .name = agg_func->name(),
-                .column_names = std::move(column_names),
-            };
-
-            types.push_back(type);
-            infos.push_back(std::move(info));
         }
         return {types, infos};
     }

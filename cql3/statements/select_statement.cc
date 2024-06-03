@@ -2000,19 +2000,22 @@ std::unique_ptr<prepared_statement> select_statement::prepare(data_dictionary::d
     auto prepared_attrs = _attrs->prepare(db, keyspace(), column_family());
     prepared_attrs->fill_prepare_context(ctx);
 
-    auto all_aggregates = [] (const std::vector<selection::prepared_selector>& prepared_selectors) {
+    auto all_aggregates = [] (const std::vector<selection::prepared_selector>& prepared_selectors, const std::vector<::shared_ptr<cql3::column_identifier::raw>>& group_by_columns) {
         return boost::algorithm::all_of(
             prepared_selectors | boost::adaptors::transformed(std::mem_fn(&selection::prepared_selector::expr)),
-            [] (const expr::expression& e) {
-                auto fn_expr = expr::as_if<expr::function_call>(&e);
-                if (!fn_expr) {
-                    return false;
+            [&] (const expr::expression& e) {
+                if (auto fn_expr = expr::as_if<expr::function_call>(&e)) {
+                    auto func = std::get_if<shared_ptr<functions::function>>(&fn_expr->func);
+                    if (!func) {
+                        return false;
+                    }
+                    return (*func)->is_aggregate();
+                } else if (auto col_expr = expr::as_if<expr::column_value>(&e)) {
+                    return boost::algorithm::any_of(group_by_columns, [&] (const ::shared_ptr<cql3::column_identifier::raw>& col) {
+                        return col->to_string() == col_expr->col->name_as_text();
+                    });
                 }
-                auto func = std::get_if<shared_ptr<functions::function>>(&fn_expr->func);
-                if (!func) {
-                    return false;
-                }
-                return (*func)->is_aggregate();
+                return false;
             }
         );
     };
@@ -2025,17 +2028,39 @@ std::unique_ptr<prepared_statement> select_statement::prepare(data_dictionary::d
     // Used to determine if an execution of this statement can be parallelized
     // using `forward_service`.
     auto can_be_forwarded = [&] {
-        return all_aggregates(prepared_selectors)   // Note: before we levellized aggregation depth
+        return all_aggregates(prepared_selectors, _group_by_columns)   // Note: before we levellized aggregation depth
             && ( // SUPPORTED PARALLELIZATION
                  // All potential intermediate coordinators must support forwarding
                 (db.features().parallelized_aggregation && selection->is_count())
                 || (db.features().uda_native_parallelized_aggregation && selection->is_reducible())
             )
             && !restrictions->need_filtering()  // No filtering
-            && group_by_cell_indices->empty()   // No GROUP BY
+            && (
+                group_by_cell_indices->empty()   // No GROUP BY
+                || db.features().parallel_group_by_aggregation
+            )
             && db.get_config().enable_parallelized_aggregation()
             && !is_local_table();
     };
+   
+    // if (keyspace() == "ks1") {
+    //     std::cout << "\nLOOOOOOOOOOOOOOOOL\n";
+    //     if (can_be_forwarded()) {
+    //         std::cout << "FORWARDING\n";
+    //     }
+    //     else {
+    //         std::cout << "NOOOOOO\n";
+    //         std::cout << "filtering: " << !restrictions->need_filtering() << "\n";
+    //         std::cout << "all aggregates: " << all_aggregates(prepared_selectors, _group_by_columns) << "\n";
+    //         std::cout << "is reducible: " << selection->is_reducible() << "\n";
+    //         std::cout << "group by: " << (
+    //             group_by_cell_indices->empty()   // No GROUP BY
+    //             || db.features().parallel_group_by_aggregation
+    //         ) << "\n";
+    //     }
+    //     std::cout << "\n";
+    //     selection->lol();
+    // }
 
     if (_parameters->is_prune_materialized_view()) {
         stmt = ::make_shared<cql3::statements::prune_materialized_view_statement>(

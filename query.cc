@@ -405,18 +405,37 @@ foreign_ptr<lw_shared_ptr<query::result>> result_merger::get() {
     return make_foreign(make_lw_shared<query::result>(std::move(w), is_short_read, row_count, partition_count, std::move(last_position)));
 }
 
+bool forward_result::has_groups() const {
+    return query_group_by_results.has_value();
+}
+
+bool forward_result::empty() const {
+    return (has_groups()) ? query_group_by_results->empty() : query_results.empty();
+}
+
 std::ostream& operator<<(std::ostream& out, const query::forward_result::printer& p) {
-    if (p.functions.size() != p.res.query_results.size()) {
-        return out << "[malformed forward_result (" << p.res.query_results.size()
+    if (p.res.query_results.size() == 0) {
+        return out << "[]";
+    }
+
+    if (p.functions.size() != p.res.query_results[0].size()) {
+        return out << "[malformed forward_result (" << p.res.query_results[0].size()
             << " results, " << p.functions.size() << " aggregates)]";
     }
 
     out << "[";
-    for (size_t i = 0; i < p.functions.size(); i++) {
-        auto& return_type = p.functions[i]->return_type();
-        out << return_type->to_string(bytes_view(*p.res.query_results[i]));
+    for (size_t i = 0; i < p.res.query_results.size(); i++) {
+        out << "(";
+        for (size_t j = 0; j < p.functions.size(); j++) {
+            auto& return_type = p.functions[j]->return_type();
+            out << return_type->to_string(bytes_view(*p.res.query_results[i][j]));
 
-        if (i + 1 < p.functions.size()) {
+            if (j + 1 < p.functions.size()) {
+                out << ", ";
+            }
+        }
+        out << ")";
+        if (i + 1 < p.res.query_results.size()) {
             out << ", ";
         }
     }

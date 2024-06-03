@@ -36,6 +36,7 @@
 #include "tracing/tracing.hh"
 #include "types/types.hh"
 #include "service/storage_proxy.hh"
+#include "gms/feature_service.hh"
 
 #include "cql3/column_identifier.hh"
 #include "cql3/cql_config.hh"
@@ -91,25 +92,56 @@ forward_aggregates::forward_aggregates(const query::forward_request& request) {
 
 void forward_aggregates::merge(query::forward_result &result, query::forward_result&& other) {
     if (result.query_results.empty()) {
-        result.query_results = std::move(other.query_results);
+        if (other.has_groups()) {
+            result.query_group_by_results = std::move(other.query_group_by_results);
+        } else {
+            result.query_results = std::move(other.query_results);
+        }
         return;
     } else if (other.query_results.empty()) {
         return;
     }
 
-    if (result.query_results.size() != other.query_results.size() || result.query_results.size() != _aggrs.size()) {
-        on_internal_error(
-            flogger,
-            format("forward_aggregates::merge(): operation cannot be completed due to invalid argument sizes. "
-                    "this.aggrs.size(): {} "
-                    "result.query_result.size(): {} "
-                    "other.query_results.size(): {} ",
-                    _aggrs.size(), result.query_results.size(), other.query_results.size())
-        );
+    if (result.has_groups() != other.has_groups()) {
+        on_internal_error(flogger, "lool");
     }
 
-    for (size_t i = 0; i < _aggrs.size(); i++) {
-        result.query_results[i] = _aggrs[i].state_reduction_function->execute(std::vector({std::move(result.query_results[i]), std::move(other.query_results[i])}));
+    auto merge_row = [this] (std::vector<bytes_opt>&& r1, std::vector<bytes_opt>&& r2) -> std::vector<bytes_opt> {
+        std::vector<bytes_opt> row;
+        row.reserve(_aggrs.size());
+        for (size_t i = 0; i < _aggrs.size(); i++) {
+            row.push_back(
+                _aggrs[i].state_reduction_function->execute(std::vector({std::move(r1[i]), std::move(r2[i])}))
+            );
+        }
+        return row;
+    };
+
+    if (result.has_groups()) {
+        for (auto&& [key, row]: *other.query_group_by_results) {
+            if (result.query_group_by_results->contains(key)) {
+                result.query_group_by_results->insert_or_assign(key, 
+                    merge_row(std::move(result.query_group_by_results->at(key)), std::move(other.query_group_by_results->at(key))));
+            } else {
+                result.query_group_by_results->insert({std::move(key), std::move(row)});
+            }
+        }
+    } else {
+        if (result.query_results.size() != other.query_results.size() || result.query_results.size() != _aggrs.size()) {
+            on_internal_error(
+                flogger,
+                format("forward_aggregates::merge(): operation cannot be completed due to invalid argument sizes. "
+                        "this.aggrs.size(): {} "
+                        "result.query_result.size(): {} "
+                        "other.query_results.size(): {} ",
+                        _aggrs.size(), result.query_results.size(), other.query_results.size())
+            );
+        }
+
+        result.query_results = merge_row(std::move(result.query_results), std::move(other.query_results));
+        // for (size_t i = 0; i < _aggrs.size(); i++) {
+            // result.query_results[i] = _aggrs[i].state_reduction_function->execute(std::vector({std::move(result.query_results[i]), std::move(other.query_results[i])}));
+        // }
     }
 }
 
@@ -497,18 +529,52 @@ future<query::forward_result> forward_service::execute_on_this_shard(
         ranges_owned_by_this_shard.clear();
     } while (current_range);
 
-    co_return co_await rs_builder.with_thread_if_needed([&req, &rs_builder, reductions = req.reduction_types, tr_state = std::move(tr_state)] {
+    co_return co_await rs_builder.with_thread_if_needed([this, &req, &rs_builder, reductions = req.reduction_types, tr_state = std::move(tr_state)] {
         auto rs = rs_builder.build();
         auto& rows = rs->rows();
-        if (rows.size() != 1) {
-            flogger.error("aggregation result row count != 1");
-            throw std::runtime_error("aggregation result row count != 1");
+
+        std::vector<bytes_opt> single_result;
+        std::optional<std::map<std::vector<bytes_opt>, std::vector<bytes_opt>>> grouping_result;
+        if (_proxy.features().parallel_group_by_aggregation && req.group_by_cell_indices && req.group_by_cell_indices->size() > 0) {
+            if (std::any_of(rows.cbegin(), rows.cend(), [&reductions] (auto& row) {
+                return row.size() != reductions.size();
+            })) {
+                flogger.error("aggregation result column count does not match requested column count");
+                throw std::runtime_error("aggregation result column count does not match requested column count");
+            }
+
+            std::map<std::vector<bytes_opt>, std::vector<bytes_opt>> grouping_map;
+            for (auto& row: rows) {
+                auto row_bytes = boost::copy_range<std::vector<bytes_opt>>(row
+                    | boost::adaptors::transformed([] (const managed_bytes_opt& x) { return to_bytes_opt(x); }));
+
+                std::vector<bytes_opt> key;
+                for (auto idx: *req.group_by_cell_indices) {
+                    if (idx >= row.size()) {
+                        on_internal_error(flogger, "loool");
+                    }
+                    key.push_back(row_bytes[idx]);
+                }
+
+                grouping_map.insert({std::move(key), std::move(row_bytes)});
+            }
+            grouping_result = std::move(grouping_map);
+        } else {
+            if (rows.size() != 1) {
+                flogger.error("aggregation result row count != 1");
+                throw std::runtime_error("aggregation result row count != 1");
+            }
+            if (rows[0].size() != reductions.size()) {
+                flogger.error("aggregation result column count does not match requested column count");
+                throw std::runtime_error("aggregation result column count does not match requested column count");
+            }
+            single_result = boost::copy_range<std::vector<bytes_opt>>(rows[0] | boost::adaptors::transformed([] (const managed_bytes_opt& x) { return to_bytes_opt(x); }));
         }
-        if (rows[0].size() != reductions.size()) {
-            flogger.error("aggregation result column count does not match requested column count");
-            throw std::runtime_error("aggregation result column count does not match requested column count");
-        }
-        query::forward_result res = { .query_results = boost::copy_range<std::vector<bytes_opt>>(rows[0] | boost::adaptors::transformed([] (const managed_bytes_opt& x) { return to_bytes_opt(x); })) };
+
+        query::forward_result res = {
+            .query_results = std::move(single_result),
+            .query_group_by_results = std::move(grouping_result),
+        };
 
         auto printer = seastar::value_of([&req, &res] {
             return query::forward_result::printer {
@@ -521,6 +587,39 @@ future<query::forward_result> forward_service::execute_on_this_shard(
 
         return res;
     });
+
+    // co_return co_await rs_builder.with_thread_if_needed([&req, &rs_builder, reductions = req.reduction_types, tr_state = std::move(tr_state)] {
+    //     auto rs = rs_builder.build();
+    //     auto& rows = rs->rows();
+        
+    //     if (std::any_of(rows.cbegin(), rows.cend(), [&reductions] (auto& row) {
+    //         return row.size() != reductions.size();
+    //     })) {
+    //         flogger.error("aggregation result column count does not match requested column count");
+    //         throw std::runtime_error("aggregation result column count does not match requested column count");
+    //     }
+
+    //     utils::chunked_vector<std::vector<bytes_opt>> rows_bytes;
+    //     rows_bytes.reserve(rows.size());
+    //     for (auto& row: rows) {
+    //         rows_bytes.emplace_back(boost::copy_range<std::vector<bytes_opt>>(row
+    //             | boost::adaptors::transformed([] (const managed_bytes_opt& x) { return to_bytes_opt(x); })));
+    //     }
+
+    //     query::forward_result res = { 
+    //         .query_results = std::move(rows_bytes)
+    //     };
+    //     auto printer = seastar::value_of([&req, &res] {
+    //         return query::forward_result::printer {
+    //             .functions = get_functions(req),
+    //             .res = res
+    //         };
+    //     });
+    //     tracing::trace(tr_state, "On shard execution result is {}", printer);
+    //     flogger.debug("on shard execution result is {}", printer);
+
+    //     return res;
+    // });
 }
 
 void forward_service::init_messaging_service() {

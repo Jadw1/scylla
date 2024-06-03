@@ -508,6 +508,10 @@ std::ostream& operator<<(std::ostream& out, const forward_request::aggregation_i
 struct forward_result {
     // vector storing query result for each selected column
     std::vector<bytes_opt> query_results;
+    std::optional<std::map<std::vector<bytes_opt>, std::vector<bytes_opt>>> query_group_by_results;
+
+    bool has_groups() const;
+    bool empty() const;
 
     struct printer {
         const std::vector<::shared_ptr<db::functions::aggregate_function>> functions;

@@ -79,6 +79,8 @@ protected:
 
     virtual ~selection() {}
 public:
+    virtual void lol() {};
+
     // Overridden by SimpleSelection when appropriate.
     virtual bool is_wildcard() const {
         return false;
