@@ -49,6 +49,8 @@
 #include "service/raft/raft_group0_client.hh"
 #include "utils/shared_dict.hh"
 #include "replica/database.hh"
+#include "service/view_building_coordinator.hh"
+#include "view_info.hh"
 
 #include <unordered_map>
 
@@ -2619,6 +2621,52 @@ future<std::vector<system_keyspace::view_build_progress>> system_keyspace::load_
         slogger.warn("Failed to load view build progress: {}", eptr);
         return std::vector<view_build_progress>();
     });
+}
+
+future<service::vbc::vbc_tasks> system_keyspace::get_view_building_coordinator_tasks() {
+    using namespace service::vbc;
+    static const sstring query = format("SELECT * FROM system.{}", VIEW_BUILDING_COORDINATOR_TASKS);
+
+    vbc_tasks tasks;
+    co_await _qp.query_internal(query, [&] (const cql3::untyped_result_set_row& row) -> future<stop_iteration> {
+        auto ks_name = row.get_as<sstring>("keyspace_name");
+        auto view_name = row.get_as<sstring>("view_name");
+        auto host_id = locator::host_id(row.get_as<utils::UUID>("host_id"));
+        auto shard = unsigned(row.get_as<int32_t>("shard"));
+        auto start_token = row.get_as<int64_t>("start_token");
+        auto end_token = row.get_as<int64_t>("end_token");
+
+        auto schema = _db.find_schema(ks_name, view_name);
+        auto base_id = schema->view_info()->base_id();
+
+        if (!tasks.contains(base_id)) {
+            tasks[base_id] = base_tasks();
+        }
+        auto& base_tasks = tasks[base_id];
+        
+        service::vbc::view_name view_key = {ks_name, view_name};
+        if (!base_tasks.contains(view_key)) {
+            base_tasks[view_key] = view_tasks();
+        }
+        auto& view_tasks = base_tasks[view_key];
+
+        std::optional<dht::token> start, end;
+        if (start_token != std::numeric_limits<int64_t>::min()) {
+            start = dht::token(start_token);
+        }
+        if (end_token != std::numeric_limits<int64_t>::min()) {
+            end = dht::token(end_token);
+        }
+        auto range = dht::token_range(start, end);
+
+        view_building_target target{host_id, shard};
+        if (!view_tasks.contains(target)) {
+            view_tasks[target] = dht::token_range_vector();
+        }
+        view_tasks[target].push_back(range);
+        co_return stop_iteration::no;
+    });
+    co_return tasks;
 }
 
 
