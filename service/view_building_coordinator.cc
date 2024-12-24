@@ -50,6 +50,7 @@ query_state& vb_coordinator_query_state() {
 
 struct vbc_state {
     vbc_tasks tasks;
+    std::optional<table_id> processing_base;
 };
 
 class view_building_coordinator : public migration_listener::only_view_notifications, public coordinator_event_subscriber {
@@ -96,8 +97,11 @@ private:
 
     future<> initialize_coordinator_state() {
         auto tasks = co_await _sys_ks.get_view_building_coordinator_tasks();
+        auto processing_base = co_await _sys_ks.get_vbc_processing_base();
+
         _state = vbc_state {
-            .tasks = std::move(tasks)
+            .tasks = std::move(tasks),
+            .processing_base = std::move(processing_base),
         };
     }
 
@@ -181,6 +185,15 @@ future<> view_building_coordinator::update_coordinator_state(group0_guard guard)
         }
     }
 
+    if (!_state->processing_base && !state_copy.tasks.empty()) {
+        auto& base_id = state_copy.tasks.cbegin()->first;
+        vbc_logger.info("Start building views for base table: {}", base_id);
+
+        auto mut = co_await _sys_ks.make_vbc_processing_base_mutation(batch.write_timestamp(), base_id);
+        batch.add_mutation(std::move(mut), "start building next base");
+        state_copy.processing_base = base_id;
+    }
+
     if (!batch.empty()) {
         co_await std::move(batch).commit(_group0.client(), _as, std::nullopt); //TODO: specify timeout?
         _state = std::move(state_copy);
@@ -247,6 +260,13 @@ future<> view_building_coordinator::remove_view(const view_name& view_name, vbc_
     state_copy.tasks[base_id].erase(view_name);
     if (state_copy.tasks[base_id].empty()) {
         state_copy.tasks.erase(base_id);
+
+        if (state_copy.processing_base && *state_copy.processing_base == base_id) {
+            auto mut = co_await _sys_ks.make_vbc_delete_processing_base_mutation(batch.write_timestamp());
+            batch.add_mutation(std::move(mut));
+
+            state_copy.processing_base = std::nullopt;
+        }
     }
 }
 
