@@ -2745,6 +2745,24 @@ future<mutation> system_keyspace::make_vbc_delete_processing_base_mutation(api::
     co_return std::move(muts[0]);
 }
 
+future<mutation> system_keyspace::make_vbc_task_done_mutation(api::timestamp_type ts, system_keyspace_view_name view_name, locator::host_id host_id, shard_id shard, dht::token_range range) {
+    static sstring query = format("DELETE FROM {}.{} WHERE keyspace_name = ? AND view_name = ? AND host_id = ? AND shard = ? AND start_token = ? AND end_token = ?", db::system_keyspace::NAME, db::system_keyspace::VIEW_BUILDING_COORDINATOR_TASKS);
+
+    data_value start = range.start() ? data_value(range.start()->value().data()) : std::numeric_limits<int64_t>::min();
+    data_value end = range.end() ? data_value(range.end()->value().data()) : std::numeric_limits<int64_t>::min();
+    std::vector<data_value_or_unset> values {
+        view_name.first, view_name.second,
+        data_value(host_id.uuid()), data_value(int32_t(shard)),
+        start, end
+    };
+    
+    auto muts = co_await _qp.get_mutations_internal(query, internal_system_query_state(), ts, std::move(values));
+    if (muts.size() != 1) {
+        on_internal_error(slogger, fmt::format("expected 1 mutation got {}", muts.size()));
+    }
+    co_return std::move(muts[0]);
+}
+
 future<std::vector<system_keyspace_view_name>> system_keyspace::load_built_tablet_views() {
     static sstring query = format("SELECT * FROM {}.{}", db::system_keyspace::NAME, db::system_keyspace::BUILT_TABLET_VIEWS);
 

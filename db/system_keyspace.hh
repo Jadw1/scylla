@@ -554,6 +554,7 @@ public:
     future<std::optional<mutation>> get_vbc_processing_base_mutation();
     future<mutation> make_vbc_delete_processing_base_mutation(api::timestamp_type ts);
     future<std::optional<table_id>> get_vbc_processing_base();
+    future<mutation> make_vbc_task_done_mutation(api::timestamp_type ts, system_keyspace_view_name view_name, locator::host_id host_id, shard_id shard, dht::token_range range);
 
     future<std::vector<system_keyspace_view_name>> load_built_tablet_views();
     future<mutation> make_tablet_view_built_mutation(api::timestamp_type ts, system_keyspace_view_name view_name);
