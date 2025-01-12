@@ -208,14 +208,9 @@ enum class messaging_verb : int32_t {
     TASKS_GET_CHILDREN = 74,
     TABLET_REPAIR = 75,
     TRUNCATE_WITH_TABLETS = 76,
-<<<<<<< Updated upstream
-    BUILD_VIEW_REQUEST = 77,
-    LAST = 78,
-=======
     BUILD_VIEWS_REQUEST = 77,
     ABORT_VBC_WORK = 78,
     LAST = 79,
->>>>>>> Stashed changes
 };
 
 } // namespace netw
