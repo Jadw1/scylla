@@ -194,6 +194,7 @@ public:
     static constexpr auto VIEW_BUILD_STATUS_V2 = "view_build_status_v2";
     static constexpr auto DICTS = "dicts";
     static constexpr auto VIEW_BUILDING_COORDINATOR_TASKS = "view_building_coordinator_tasks";
+    static constexpr auto BUILT_TABLET_VIEWS = "built_tablet_views";
 
     // auth
     static constexpr auto ROLES = "roles";
@@ -290,6 +291,7 @@ public:
     static schema_ptr view_build_status_v2();
     static schema_ptr dicts();
     static schema_ptr view_building_coordinator_tasks();
+    static schema_ptr built_tablet_views();
 
     // auth
     static schema_ptr roles();
@@ -547,6 +549,9 @@ public:
     future<std::vector<view_build_progress>> load_view_build_progress();
 
     future<service::vbc::vbc_tasks> get_view_building_coordinator_tasks();
+
+    future<std::vector<system_keyspace_view_name>> load_built_tablet_views();
+    future<mutation> make_tablet_view_built_mutation(api::timestamp_type ts, system_keyspace_view_name view_name);
 
     // Paxos related functions
     future<service::paxos::paxos_state> load_paxos_state(partition_key_view key, schema_ptr s, gc_clock::time_point now,
