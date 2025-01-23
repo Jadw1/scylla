@@ -39,6 +39,7 @@ namespace vbc {
 
 struct vbc_state {
     vbc_tasks tasks;
+    std::optional<table_id> processing_base;
 };
 
 class view_building_coordinator : public migration_listener::only_view_notifications {
@@ -79,8 +80,11 @@ private:
 
     future<vbc_state> load_coordinator_state() {
         auto tasks = co_await _sys_ks.get_view_building_coordinator_tasks();
+        auto processing_base = co_await _sys_ks.get_vbc_processing_base();
+
         co_return vbc_state {
-            .tasks = std::move(tasks)
+            .tasks = std::move(tasks),
+            .processing_base = std::move(processing_base),
         };
     }
     
@@ -138,7 +142,20 @@ future<std::optional<vbc_state>> view_building_coordinator::update_coordinator_s
         for (auto& view: views) {
             auto muts = co_await remove_view(guard, view);
             cmuts.insert(cmuts.end(), std::make_move_iterator(muts.begin()), std::make_move_iterator(muts.end()));
+
+            if (state.processing_base && *state.processing_base == get_base_id(view)) {
+                auto mut = co_await _sys_ks.make_vbc_delete_processing_base_mutation(guard.write_timestamp());
+                cmuts.emplace_back(std::move(mut));
+                state.processing_base = std::nullopt;
+            }
         }
+    } else if (!state.processing_base && !state.tasks.empty()) {
+        // select base table to process
+        auto& base_id = state.tasks.cbegin()->first;
+        vbc_logger.info("Start building views for base table: {}", base_id);
+
+        auto mut = co_await _sys_ks.make_vbc_processing_base_mutation(guard.write_timestamp(), base_id);
+        cmuts.emplace_back(std::move(mut));
     }
 
     if (!cmuts.empty()) {
