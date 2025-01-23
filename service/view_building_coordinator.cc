@@ -128,10 +128,18 @@ private:
     table_id get_base_id(const view_name& view_name) {
         return _db.find_schema(view_name.first, view_name.second)->view_info()->base_id();
     }
+    std::set<locator::host_id> get_active_hosts() {
+        std::set<locator::host_id> hosts;
+        for (auto& [target, _]: _rpc_handlers) {
+            hosts.insert(target.host);
+        }
+        return hosts;
+    }
 
     future<> build_view();
     future<> send_task(view_building_target target, table_id base_id, dht::token_range range, std::vector<view_name> views);
     future<std::pair<std::vector<mutation>, vbc_state>> mark_task_completed(vbc_state state_copy, group0_guard& guard, view_building_target target, table_id base_id, dht::token_range range, std::vector<view_name> views);
+    future<> abort_work(locator::host_id host);
 
 private:
     future<std::set<view_name>> load_all_views() {
@@ -293,6 +301,10 @@ future<std::pair<std::vector<mutation>, vbc_state>> view_building_coordinator::m
     co_return std::pair{std::move(muts), std::move(state_copy)};
 }
 
+future<> view_building_coordinator::abort_work(locator::host_id host) {
+    return ser::view_rpc_verbs::send_abort_vbc_work(&_messaging, host);
+}
+
 future<> view_building_coordinator::update_coordinator_state(group0_guard guard) {
     SCYLLA_ASSERT(_state);
     vbc_logger.debug("update_coordinator_state()");
@@ -389,6 +401,9 @@ future<> view_building_coordinator::remove_view(const view_name& view_name, vbc_
 
 future<> view_building_coordinator::stop() {
     _as.request_abort();
+    co_await coroutine::parallel_for_each(get_active_hosts(), [this] (auto host) -> future<> {
+        co_await abort_work(host);
+    });
     co_await coroutine::parallel_for_each(std::move(_rpc_handlers), [] (auto&& rpc_call) -> future<> {
         co_await std::move(rpc_call.second);
     });
