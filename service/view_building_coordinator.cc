@@ -68,6 +68,9 @@ future<view_building_coordinator::vbc_state> view_building_coordinator::load_coo
     auto tasks = co_await _sys_ks.get_view_building_coordinator_tasks();
     auto processing_base = co_await _sys_ks.get_vbc_processing_base();
 
+    vbc_logger.debug("Loaded state: {}", tasks);
+    vbc_logger.debug("Processing base: {}", processing_base);
+
     co_return vbc_state {
         .tasks = std::move(tasks),
         .processing_base = std::move(processing_base),
@@ -94,7 +97,7 @@ future<> view_building_coordinator::run() {
             co_await build_view(std::move(*state_opt));
             co_await await_event();
         } catch (...) {
-            
+            vbc_logger.warn("Error: {}", std::current_exception());
         }
         co_await coroutine::maybe_yield();
     }
@@ -136,12 +139,17 @@ future<std::optional<view_building_coordinator::vbc_state>> view_building_coordi
     }
 
     if (!cmuts.empty()) {
-        auto cmd = _group0.client().prepare_command(write_mutations{
-            .mutations{std::move(cmuts)},
-        }, guard, "update view building coordinator state");
-        co_await _group0.client().add_entry(std::move(cmd), std::move(guard), _as);
+        try {
+            auto cmd = _group0.client().prepare_command(write_mutations{
+                .mutations{std::move(cmuts)},
+            }, guard, "update view building coordinator state");
+            co_await _group0.client().add_entry(std::move(cmd), std::move(guard), _as);
+        } catch (...) {
+            vbc_logger.warn("Error while update_coordinator_state(): {}", std::current_exception());
+        }
         co_return std::nullopt;
     }
+    vbc_logger.debug("no updates to process, returning current state...");
     co_return state;
 }
 
@@ -186,6 +194,7 @@ future<> view_building_coordinator::build_view(vbc_state state) {
         for (size_t shard = 0; shard < replica_state.shard_count; ++shard) {
             view_building_target target{host_id, shard};
             if (_rpc_handlers.contains(target) && !_rpc_handlers.at(target).available()) {
+                vbc_logger.debug("Target {} is still processing request.", target);
                 continue;
             }
             if (_rpc_handlers.contains(target)) {
@@ -194,6 +203,7 @@ future<> view_building_coordinator::build_view(vbc_state state) {
 
             auto [views, range] = get_views_and_range_for_target(base_tasks, target);
             if (views.empty()) {
+                vbc_logger.debug("No views to build for target {}", target);
                 continue;
             }
 
@@ -218,7 +228,17 @@ future<> view_building_coordinator::send_task(view_building_target target, table
         co_return;
     }
 
-    co_await mark_task_completed(target, base_id, range, std::move(views));
+    int retires = 3;
+    while (retires-- > 0) {
+        try {
+            co_await mark_task_completed(target, base_id, range, std::move(views));
+        } catch (group0_concurrent_modification&) {
+            vbc_logger.warn("group0_concurrent_modification exception while processing building request, tries left: {}", retires);
+        } catch (...) {
+            vbc_logger.warn("Failed while processing view building request response: {}", std::current_exception());
+            break;
+        }
+    }
     _cond.broadcast();
 }
 
