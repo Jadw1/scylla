@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <memory>
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
 
@@ -17,8 +18,17 @@
 #include "service/migration_manager.hh"
 #include "service/raft/raft_group0.hh"
 #include "service/topology_state_machine.hh"
+#include "service/migration_listener.hh"
+
+namespace replica {
+class database;
+}
 
 namespace service {
+
+class group0_guard;
+class group0_batch;
+
 
 namespace vbc {
 struct view_building_target {

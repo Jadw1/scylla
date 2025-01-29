@@ -132,7 +132,11 @@ future<std::optional<view_building_coordinator::vbc_state>> view_building_coordi
     }
 
     if (!batch.empty()) {
-        co_await std::move(batch).commit(_group0.client(), _as, std::nullopt); //TODO: specify timeout?
+        try {
+            co_await std::move(batch).commit(_group0.client(), _as, std::nullopt); //TODO: specify timeout?
+        } catch (...) {
+            vbc_logger.warn("Error while update_coordinator_state(): {}", std::current_exception());
+        }
         co_return std::nullopt;
     }
     co_return state;
@@ -207,7 +211,17 @@ future<> view_building_coordinator::send_task(view_building_target target, table
         co_return;
     }
 
-    co_await mark_task_completed(target, base_id, range, std::move(views));
+    int retires = 3;
+    while (retires-- > 0) {
+        try {
+            co_await mark_task_completed(target, base_id, range, std::move(views));
+        } catch (group0_concurrent_modification&) {
+            vbc_logger.warn("group0_concurrent_modification exception while processing building request, tries left: {}", retires);
+        } catch (...) {
+            vbc_logger.warn("Failed while processing view building request response: {}", std::current_exception());
+            break;
+        }
+    }
     _cond.broadcast();
 }
 
