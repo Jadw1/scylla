@@ -1098,7 +1098,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         return true;
     }
 
-    future<> for_each_tablet_transition(std::function<void(const locator::tablet_map&,
+    future<> for_each_tablet_transition(std::function<future<>(const locator::tablet_map&,
                                                            schema_ptr,
                                                            locator::global_tablet_id,
                                                            const locator::tablet_transition_info&)> func) {
@@ -1107,9 +1107,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             co_await coroutine::maybe_yield();
             auto s = _db.find_schema(table);
             for (auto&& [tablet, trinfo]: tmap->transitions()) {
-                co_await coroutine::maybe_yield();
                 auto gid = locator::global_tablet_id {table, tablet};
-                func(*tmap, s, gid, trinfo);
+                co_await func(*tmap, s, gid, trinfo);
             }
         }
     }
@@ -1208,6 +1207,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         std::vector<canonical_mutation> updates;
         bool needs_barrier = false;
         bool has_transitions = false;
+        bool notify_vb_coordinator = false;
 
         shared_promise barrier;
         auto fail_barrier = seastar::defer([&] {
@@ -1220,7 +1220,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         co_await for_each_tablet_transition([&] (const locator::tablet_map& tmap,
                                                  schema_ptr s,
                                                  locator::global_tablet_id gid,
-                                                 const locator::tablet_transition_info& trinfo) {
+                                                 const locator::tablet_transition_info& trinfo) -> future<> {
             has_transitions = true;
             auto last_token = tmap.get_last_token(gid.tablet);
             auto& tablet_state = _tablets[gid];
@@ -1230,11 +1230,19 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 return replica::tablet_mutation_builder(guard.write_timestamp(), table);
             };
 
-            auto transition_to = [&] (locator::tablet_transition_stage stage) {
+            auto transition_to = [&] (locator::tablet_transition_stage stage) -> future<> {
                 rtlogger.debug("Will set tablet {} stage to {}", gid, stage);
                 updates.emplace_back(get_mutation_builder()
                         .set_stage(last_token, stage)
                         .build());
+
+                if (_vb_coordinator_ptr) {
+                    auto muts = co_await _vb_coordinator_ptr->get_adjust_task_mutations(guard, tmap, gid, trinfo, stage);
+                    notify_vb_coordinator = !muts.empty() || notify_vb_coordinator;
+                    for (auto&& mut: muts) {
+                        updates.emplace_back(std::move(mut));
+                    }
+                }
             };
 
             auto do_barrier = [&] {
@@ -1244,9 +1252,9 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 });
             };
 
-            auto transition_to_with_barrier = [&] (locator::tablet_transition_stage stage) {
+            auto transition_to_with_barrier = [&] (locator::tablet_transition_stage stage) -> future<> {
                 if (do_barrier()) {
-                    transition_to(stage);
+                    co_await transition_to(stage);
                 }
             };
 
@@ -1271,7 +1279,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 case locator::tablet_transition_stage::allow_write_both_read_old:
                     if (action_failed(tablet_state.barriers[trinfo.stage])) {
                         if (check_excluded_replicas()) {
-                            transition_to_with_barrier(locator::tablet_transition_stage::cleanup_target);
+                            co_await transition_to_with_barrier(locator::tablet_transition_stage::cleanup_target);
                             break;
                         }
                     }
@@ -1288,11 +1296,11 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 case locator::tablet_transition_stage::write_both_read_old:
                     if (action_failed(tablet_state.barriers[trinfo.stage])) {
                         if (check_excluded_replicas()) {
-                            transition_to_with_barrier(locator::tablet_transition_stage::cleanup_target);
+                            co_await transition_to_with_barrier(locator::tablet_transition_stage::cleanup_target);
                             break;
                         }
                     }
-                    transition_to_with_barrier(locator::tablet_transition_stage::streaming);
+                    co_await transition_to_with_barrier(locator::tablet_transition_stage::streaming);
                     break;
                 // The state "streaming" is needed to ensure that stale stream_tablet() RPC doesn't
                 // get admitted before global_tablet_token_metadata_barrier() is finished for earlier
@@ -1370,11 +1378,11 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                             next_stage = locator::tablet_transition_stage::cleanup_target;
                         }
                     }
-                    transition_to_with_barrier(next_stage);
+                    co_await transition_to_with_barrier(next_stage);
                 }
                     break;
                 case locator::tablet_transition_stage::use_new:
-                    transition_to_with_barrier(locator::tablet_transition_stage::cleanup);
+                    co_await transition_to_with_barrier(locator::tablet_transition_stage::cleanup);
                     break;
                 case locator::tablet_transition_stage::cleanup:
                     if (advance_in_background(gid, tablet_state.cleanup, "cleanup", [&] {
@@ -1392,7 +1400,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                         return ser::storage_service_rpc_verbs::send_tablet_cleanup(&_messaging,
                                                                                    dst.host, _as, raft::server_id(dst.host.uuid()), gid);
                     })) {
-                        transition_to(locator::tablet_transition_stage::end_migration);
+                        co_await transition_to(locator::tablet_transition_stage::end_migration);
                     }
                     break;
                 case locator::tablet_transition_stage::cleanup_target:
@@ -1410,7 +1418,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                         return ser::storage_service_rpc_verbs::send_tablet_cleanup(&_messaging,
                                                                                    dst.host, _as, raft::server_id(dst.host.uuid()), gid);
                     })) {
-                        transition_to(locator::tablet_transition_stage::revert_migration);
+                        co_await transition_to(locator::tablet_transition_stage::revert_migration);
                     }
                     break;
                 case locator::tablet_transition_stage::revert_migration:
@@ -1535,6 +1543,9 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                     .set_version(_topo_sm._topology.version + 1)
                     .build());
             co_await update_topology_state(std::move(guard), std::move(updates), format("Tablet migration"));
+            if (notify_vb_coordinator) {
+                _vb_coordinator_ptr->notify();
+            }
         }
 
         if (needs_barrier) {

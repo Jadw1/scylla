@@ -14,6 +14,7 @@
 
 #include "dht/i_partitioner_fwd.hh"
 #include "locator/host_id.hh"
+#include "locator/tablets.hh"
 #include "schema/schema_fwd.hh"
 #include "service/migration_manager.hh"
 #include "service/raft/raft_group0.hh"
@@ -63,12 +64,17 @@ class view_building_coordinator : public migration_listener::only_view_notificat
     condition_variable _cond;
     semaphore _rpc_response_mutex = semaphore(1);
     std::map<view_building_target, future<>> _rpc_handlers;
+    std::map<view_building_target, dht::token_range> _per_host_processing_range;
 
 public:
     view_building_coordinator(abort_source& as, replica::database& db, raft_group0& group0, db::system_keyspace& sys_ks, netw::messaging_service& messaging, const topology_state_machine& topo_sm); 
 
     future<> run();
     future<> stop();
+
+    future<std::vector<mutation>> get_adjust_task_mutations(const group0_guard& guard, const locator::tablet_map& tmap, locator::global_tablet_id gid, const locator::tablet_transition_info& trinfo, locator::tablet_transition_stage new_stage);
+
+    void notify() { _cond.broadcast(); }
 
     virtual void on_create_view(const sstring& ks_name, const sstring& view_name) override { _cond.broadcast(); }
     virtual void on_update_view(const sstring& ks_name, const sstring& view_name, bool columns_changed) override {}
