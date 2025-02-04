@@ -44,79 +44,39 @@ namespace service {
 
 namespace vbc {
 
-struct vbc_state {
-    vbc_tasks tasks;
-    std::optional<table_id> processing_base;
-};
+view_building_coordinator::view_building_coordinator(abort_source& as, replica::database& db, raft_group0& group0, db::system_keyspace& sys_ks, netw::messaging_service& messaging, const topology_state_machine& topo_sm) 
+    : _db(db)
+    , _group0(group0)
+    , _sys_ks(sys_ks)
+    , _messaging(messaging)
+    , _topo_sm(topo_sm)
+    , _as(as) 
+{}
 
-class view_building_coordinator : public migration_listener::only_view_notifications {
-    replica::database& _db;
-    raft_group0& _group0;
-    db::system_keyspace& _sys_ks;
-    netw::messaging_service& _messaging;
-    const topology_state_machine& _topo_sm;
-    
-    abort_source& _as;
-    condition_variable _cond;
-    semaphore _rpc_response_mutex = semaphore(1);
-    std::map<view_building_target, future<>> _rpc_handlers;
+future<group0_guard> view_building_coordinator::start_operation() {
+    auto guard = co_await _group0.client().start_operation(_as);
+    co_return std::move(guard);
+}
 
-public:
-    view_building_coordinator(abort_source& as, replica::database& db, raft_group0& group0, db::system_keyspace& sys_ks, netw::messaging_service& messaging, const topology_state_machine& topo_sm) 
-        : _db(db)
-        , _group0(group0)
-        , _sys_ks(sys_ks)
-        , _messaging(messaging)
-        , _topo_sm(topo_sm)
-        , _as(as) 
-    {}
+future<> view_building_coordinator::await_event() {
+    _as.check();
+    co_await _cond.when();
+    vbc_logger.debug("event awaited");
+}
 
-    future<> run();
-    future<> stop();
+future<view_building_coordinator::vbc_state> view_building_coordinator::load_coordinator_state() {
+    auto tasks = co_await _sys_ks.get_view_building_coordinator_tasks();
+    auto processing_base = co_await _sys_ks.get_vbc_processing_base();
 
-    virtual void on_create_view(const sstring& ks_name, const sstring& view_name) override { _cond.broadcast(); }
-    virtual void on_update_view(const sstring& ks_name, const sstring& view_name, bool columns_changed) override {}
-    virtual void on_drop_view(const sstring& ks_name, const sstring& view_name) override { _cond.broadcast(); }
+    co_return vbc_state {
+        .tasks = std::move(tasks),
+        .processing_base = std::move(processing_base),
+    };
+}
 
-private:
-    future<group0_guard> start_operation() {
-        auto guard = co_await _group0.client().start_operation(_as);
-        co_return std::move(guard);
-    }
-
-    future<> await_event() {
-        _as.check();
-        co_await _cond.when();
-        vbc_logger.debug("event awaited");
-    }
-
-    future<vbc_state> load_coordinator_state() {
-        auto tasks = co_await _sys_ks.get_view_building_coordinator_tasks();
-        auto processing_base = co_await _sys_ks.get_vbc_processing_base();
-
-        co_return vbc_state {
-            .tasks = std::move(tasks),
-            .processing_base = std::move(processing_base),
-        };
-    }
-    
-
-    future<std::optional<vbc_state>> update_coordinator_state();
-    future<std::vector<canonical_mutation>> add_view(const group0_guard& guard, const view_name& view_name);
-    future<std::vector<canonical_mutation>> remove_view(const group0_guard& guard, const view_name& view_name);
-
-    std::set<view_name> get_views_to_add(const vbc_state& state, const std::vector<view_name>& views, const std::vector<view_name>& built);
-    std::set<view_name> get_views_to_remove(const vbc_state& state, const std::vector<view_name>& views);
-    
-    table_id get_base_id(const view_name& view_name) {
-        return _db.find_schema(view_name.first, view_name.second)->view_info()->base_id();
-    }
-
-    future<> build_view(vbc_state state);
-    future<> send_task(view_building_target target, table_id base_id, dht::token_range range, std::vector<view_name> views);
-    future<> mark_task_completed(view_building_target target, table_id base_id, dht::token_range range, std::vector<view_name> views);
-    future<> abort_work(locator::host_id host, unsigned shard);
-};
+table_id view_building_coordinator::get_base_id(const view_name& view_name) {
+    return _db.find_schema(view_name.first, view_name.second)->view_info()->base_id();
+}
 
 future<> view_building_coordinator::run() {
     auto abort = _as.subscribe([this] noexcept {
@@ -140,7 +100,7 @@ future<> view_building_coordinator::run() {
     }
 }
 
-future<std::optional<vbc_state>> view_building_coordinator::update_coordinator_state() {
+future<std::optional<view_building_coordinator::vbc_state>> view_building_coordinator::update_coordinator_state() {
     vbc_logger.debug("update_coordinator_state()");
 
     auto guard = co_await start_operation();
@@ -369,14 +329,12 @@ future<> view_building_coordinator::stop() {
     });
 }
 
-future<> run_view_building_coordinator(abort_source& as, replica::database& db, raft_group0& group0, db::system_keyspace& sys_ks, netw::messaging_service& messaging, const topology_state_machine& topo_sm) {
-    view_building_coordinator vb_coordinator{as, db, group0, sys_ks, messaging, topo_sm};
-
+future<> run_view_building_coordinator(std::unique_ptr<view_building_coordinator> vb_coordinator, replica::database& db, raft_group0& group0) {
     std::exception_ptr ex;
-    db.get_notifier().register_listener(&vb_coordinator);
+    db.get_notifier().register_listener(vb_coordinator.get());
     try {
         co_await with_scheduling_group(group0.get_scheduling_group(), [&] {
-            return vb_coordinator.run();
+            return vb_coordinator->run();
         });
     } catch (...) {
         ex = std::current_exception();
@@ -385,8 +343,8 @@ future<> run_view_building_coordinator(abort_source& as, replica::database& db, 
         on_fatal_internal_error(vbc_logger, format("unhandled exception in view_building_coordinator::run(): {}", ex));
     }
 
-    co_await db.get_notifier().unregister_listener(&vb_coordinator);
-    co_await vb_coordinator.stop();
+    co_await db.get_notifier().unregister_listener(vb_coordinator.get());
+    co_await vb_coordinator->stop();
 
     co_return;
 }
