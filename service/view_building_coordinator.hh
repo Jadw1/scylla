@@ -14,6 +14,7 @@
 #include "dht/i_partitioner_fwd.hh"
 #include "locator/host_id.hh"
 #include "schema/schema_fwd.hh"
+#include "service/migration_manager.hh"
 #include "service/raft/raft_group0.hh"
 #include "service/topology_state_machine.hh"
 
@@ -34,8 +35,57 @@ using view_tasks = std::map<view_building_target, dht::token_range_vector>;
 using base_tasks = std::map<view_name, view_tasks>;
 struct vbc_tasks : public std::map<table_id, base_tasks> {};
 
-future<> run_view_building_coordinator(abort_source& as, replica::database& db, raft_group0& group0, db::system_keyspace& sys_ks, netw::messaging_service& messaging, const topology_state_machine& topo_sm);
 
+
+class view_building_coordinator : public migration_listener::only_view_notifications {
+    struct vbc_state {
+        vbc_tasks tasks;
+        std::optional<table_id> processing_base;
+    };
+
+    replica::database& _db;
+    raft_group0& _group0;
+    db::system_keyspace& _sys_ks;
+    netw::messaging_service& _messaging;
+    const topology_state_machine& _topo_sm;
+    
+    abort_source& _as;
+    condition_variable _cond;
+    semaphore _rpc_response_mutex = semaphore(1);
+    std::map<view_building_target, future<>> _rpc_handlers;
+
+public:
+    view_building_coordinator(abort_source& as, replica::database& db, raft_group0& group0, db::system_keyspace& sys_ks, netw::messaging_service& messaging, const topology_state_machine& topo_sm); 
+
+    future<> run();
+    future<> stop();
+
+    virtual void on_create_view(const sstring& ks_name, const sstring& view_name) override { _cond.broadcast(); }
+    virtual void on_update_view(const sstring& ks_name, const sstring& view_name, bool columns_changed) override {}
+    virtual void on_drop_view(const sstring& ks_name, const sstring& view_name) override { _cond.broadcast(); }
+
+private:
+    future<group0_guard> start_operation();
+    future<> await_event();
+    future<vbc_state> load_coordinator_state();
+    
+
+    future<std::optional<vbc_state>> update_coordinator_state();
+    future<> add_view(const view_name& view_name, group0_batch& batch);
+    future<> remove_view(const view_name& view_name, group0_batch& batch);
+
+    std::set<view_name> get_views_to_add(const vbc_state& state, const std::vector<view_name>& views, const std::vector<view_name>& built);
+    std::set<view_name> get_views_to_remove(const vbc_state& state, const std::vector<view_name>& views);
+    
+    table_id get_base_id(const view_name& view_name);
+
+    future<> build_view(vbc_state state);
+    future<> send_task(view_building_target target, table_id base_id, dht::token_range range, std::vector<view_name> views);
+    future<> mark_task_completed(view_building_target target, table_id base_id, dht::token_range range, std::vector<view_name> views);
+    future<> abort_work(locator::host_id host, unsigned shard);
+};
+
+future<> run_view_building_coordinator(std::unique_ptr<view_building_coordinator> vb_coordinator, replica::database& db, raft_group0& group0);
 }
 
 }

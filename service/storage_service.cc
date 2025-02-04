@@ -1146,7 +1146,8 @@ future<> storage_service::raft_state_monitor_fiber(raft::server& raft, gate::hol
                     _lifecycle_notifier,
                     _feature_service);
             if (_feature_service.view_building_coordinator) {
-                _view_building_coordinator = vbc::run_view_building_coordinator(*as, _db.local(), *_group0, _sys_ks.local(), _messaging.local(), _topology_state_machine);
+                 auto vbc_ptr = std::make_unique<vbc::view_building_coordinator>(*as, _db.local(), *_group0, _sys_ks.local(), _messaging.local(), _topology_state_machine);
+                _view_building_coordinator = vbc::run_view_building_coordinator(std::move(vbc_ptr), _db.local(), *_group0);
             }
         }
     } catch (...) {
