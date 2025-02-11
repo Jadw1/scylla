@@ -362,7 +362,7 @@ future<> group0_state_machine::transfer_snapshot(raft::server_id from_id, raft::
             &_mm._messaging, hid, as, from_id, service::raft_snapshot_pull_params{std::move(tables)});
 
         tables = std::vector<table_id>();
-        tables.reserve(auth_tables.size() + 1);
+        tables.reserve(auth_tables.size() + 4);
 
         for (const auto& schema : auth_tables) {
             tables.push_back(schema->id());
@@ -370,6 +370,7 @@ future<> group0_state_machine::transfer_snapshot(raft::server_id from_id, raft::
         tables.push_back(db::system_keyspace::service_levels_v2()->id());
         tables.push_back(db::system_keyspace::view_building_coordinator_tasks()->id());
         tables.push_back(db::system_keyspace::built_tablet_views()->id());
+        tables.push_back(db::system_keyspace::view_building_coordinator_staging_sstables()->id());
 
         raft_snp = co_await ser::storage_service_rpc_verbs::send_raft_pull_snapshot(
             &_mm._messaging, hid, as, from_id, service::raft_snapshot_pull_params{std::move(tables)});
