@@ -362,7 +362,7 @@ future<> group0_state_machine::transfer_snapshot(raft::server_id from_id, raft::
             &_mm._messaging, hid, as, from_id, service::raft_snapshot_pull_params{std::move(tables)});
 
         tables = std::vector<table_id>();
-        tables.reserve(auth_tables.size() + 1);
+        tables.reserve(auth_tables.size() + 4);
 
         for (const auto& schema : auth_tables) {
             tables.push_back(schema->id());
