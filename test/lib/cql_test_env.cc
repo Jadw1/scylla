@@ -10,6 +10,7 @@
 #include <random>
 #include <seastar/core/thread.hh>
 #include <seastar/util/defer.hh>
+#include "db/view/view_building_worker.hh"
 #include "replica/database_fwd.hh"
 #include "test/lib/cql_test_env.hh"
 #include "cdc/generation_service.hh"
@@ -136,6 +137,7 @@ private:
     sharded<cql3::query_processor> _qp;
     sharded<auth::service> _auth_service;
     sharded<db::view::view_builder> _view_builder;
+    sharded<db::view::view_building_worker> _view_building_worker;
     sharded<db::view::view_update_generator> _view_update_generator;
     sharded<service::migration_notifier> _mnotifier;
     sharded<qos::service_level_controller> _sl_controller;
@@ -844,7 +846,7 @@ private:
                 std::ref(_ms), std::ref(_fd)).get();
             auto stop_raft_gr = deferred_stop(_group0_registry);
 
-            _stream_manager.start(std::ref(*cfg), std::ref(_db), std::ref(_view_builder), std::ref(_ms), std::ref(_mm), std::ref(_gossiper), scheduling_groups.streaming_scheduling_group).get();
+            _stream_manager.start(std::ref(*cfg), std::ref(_db), std::ref(_view_builder), std::ref(_view_building_worker), std::ref(_ms), std::ref(_mm), std::ref(_gossiper), scheduling_groups.streaming_scheduling_group).get();
             auto stop_streaming = defer_verbose_shutdown("stream manager", [this] { _stream_manager.stop().get(); });
 
             _feature_service.invoke_on_all([] (auto& fs) {
@@ -974,6 +976,11 @@ private:
             _view_builder.start(std::ref(_db), std::ref(_sys_ks), std::ref(_sys_dist_ks), std::ref(_mnotifier), std::ref(_view_update_generator), std::ref(group0_client), std::ref(_qp)).get();
             auto stop_view_builder = defer_verbose_shutdown("view builder", [this] {
                 _view_builder.stop().get();
+            });
+
+            _view_building_worker.start(std::ref(_db), std::ref(group0_client), std::ref(_sys_ks), std::ref(_view_update_generator), std::ref(_ms)).get();
+            auto stop_view_building_worker = defer_verbose_shutdown("view building worker", [this] {
+                _view_building_worker.stop().get();
             });
 
             if (cfg_in.need_remote_proxy) {
