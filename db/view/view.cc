@@ -3795,6 +3795,19 @@ future<> view_building_worker::register_staging_sstables() {
     }
 }
 
+future<> view_building_worker::process_staging_sstables(table_id base_id) {
+    auto& table = _db.find_column_family(base_id);
+
+    sstables::sstable_directory dir(table, sstables::sstable_state::staging, default_io_error_handler_gen());
+    co_await dir.process_sstable_dir(sstables::sstable_directory::process_flags{ .sort_sstables_according_to_owner = true });
+    auto& local_sstables = dir.get_unshared_local_sstables();
+
+    auto table_ptr = table.shared_from_this();
+    for (auto& sst: local_sstables) {
+        co_await _vug.register_staging_sstable(sst, table_ptr);
+    }
+}
+
 void view_building_worker::init_messaging_service() {
     ser::view_rpc_verbs::register_build_views_range(&_messaging.local(), [this] (table_id base_id, unsigned shard, dht::token_range range, std::vector<table_id> views) -> future<> {
         return container().invoke_on(shard, [base_id, range = std::move(range), views = std::move(views)] (auto& vbr) {
@@ -3806,6 +3819,11 @@ void view_building_worker::init_messaging_service() {
             vbw._view_building_as.request_abort();
         });
         co_return rpc::no_wait_type{};
+    });
+    ser::view_rpc_verbs::register_register_staging_sstables(&_messaging.local(), [this] (table_id base_id, unsigned shard) -> future<> {
+        return container().invoke_on(shard, [base_id] (auto& vbw) {
+            return vbw.process_staging_sstables(base_id);
+        });
     });
 }
 
