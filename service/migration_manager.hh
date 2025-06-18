@@ -18,7 +18,6 @@
 #include "gms/feature.hh"
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "schema/schema_fwd.hh"
-#include "service/storage_service.hh"
 #include "utils/serialized_action.hh"
 #include "service/raft/raft_group_registry.hh"
 #include "service/raft/raft_group0_client.hh"
@@ -63,7 +62,6 @@ private:
     gms::feature_service& _feat;
     netw::messaging_service& _messaging;
     service::storage_proxy& _storage_proxy;
-    sharded<service::storage_service>& _ss;
     gms::gossiper& _gossiper;
     seastar::abort_source _as;
     service::raft_group0_client& _group0_client;
@@ -89,7 +87,7 @@ private:
     friend class group0_state_machine; // needed for access to _messaging
     size_t _concurrent_ddl_retries;
 public:
-    migration_manager(migration_notifier&, gms::feature_service&, netw::messaging_service& ms, service::storage_proxy&, sharded<service::storage_service>& ss, gms::gossiper& gossiper, service::raft_group0_client& group0_client, sharded<db::system_keyspace>& sysks);
+    migration_manager(migration_notifier&, gms::feature_service&, netw::messaging_service& ms, service::storage_proxy&, gms::gossiper& gossiper, service::raft_group0_client& group0_client, sharded<db::system_keyspace>& sysks);
 
     migration_notifier& get_notifier() { return _notifier; }
     const migration_notifier& get_notifier() const { return _notifier; }
@@ -234,7 +232,7 @@ future<std::vector<mutation>> prepare_aggregate_drop_announcement(storage_proxy&
 
 future<std::vector<mutation>> prepare_update_type_announcement(storage_proxy& sp, user_type updated_type, api::timestamp_type ts);
 
-future<std::vector<mutation>> prepare_keyspace_drop_announcement(replica::database& db, const sstring& ks_name, api::timestamp_type ts);
+future<std::vector<mutation>> prepare_keyspace_drop_announcement(storage_proxy& sp, const sstring& ks_name, api::timestamp_type ts);
 
 class drop_views_tag;
 using drop_views = bool_class<drop_views_tag>;
