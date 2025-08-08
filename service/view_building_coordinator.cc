@@ -339,16 +339,26 @@ future<bool> view_building_coordinator::work_on_view_building(group0_guard guard
             continue;
         }
 
-        if (auto already_started_ids = _vb_sm.building_state.get_started_tasks(*_vb_sm.building_state.currently_processed_base_table, replica); !already_started_ids.empty()) {
+        auto already_started_ids = _vb_sm.building_state.get_started_tasks(*_vb_sm.building_state.currently_processed_base_table, replica);
+        if (already_started_ids.empty()) {
+            vbc_logger.debug("[replica {}] no started tasks", replica);
+        }
+        if (!already_started_ids.empty()) {
             // If the replica has any task in `STARTED` state, attach the coordinator to the work.
             attach_to_started_tasks(replica, std::move(already_started_ids));
-        } else if (auto todo_ids = select_tasks_for_replica(replica); !todo_ids.empty()) {
-            // If the replica has no started tasks and there are tasks to do, mark them as started.
-            // The coordinator will attach itself to the work in next iteration.
-            auto new_mutations = co_await start_tasks(guard, std::move(todo_ids));
-            muts.insert(muts.end(), std::make_move_iterator(new_mutations.begin()), std::make_move_iterator(new_mutations.end()));
         } else {
-            vbc_logger.debug("Nothing to do for replica {}", replica);
+            auto todo_ids = select_tasks_for_replica(replica);
+            if (todo_ids.empty()) {
+                vbc_logger.debug("[replica {}] no tasks to start", replica);
+            }
+            if (!todo_ids.empty()) {
+                // If the replica has no started tasks and there are tasks to do, mark them as started.
+                // The coordinator will attach itself to the work in next iteration.
+                auto new_mutations = co_await start_tasks(guard, std::move(todo_ids));
+                muts.insert(muts.end(), std::make_move_iterator(new_mutations.begin()), std::make_move_iterator(new_mutations.end()));
+            } else {
+                vbc_logger.debug("Nothing to do for replica {}", replica);
+            }
         }
     }
 
@@ -388,6 +398,8 @@ std::vector<utils::UUID> view_building_coordinator::select_tasks_for_replica(loc
         }) | std::ranges::to<std::vector>();
     };
 
+    vbc_logger.debug("[replica {}] entering task selection", replica);
+
     auto& base_tasks = _vb_sm.building_state.tasks_state[*_vb_sm.building_state.currently_processed_base_table];
     if (!base_tasks.contains(replica)) {
         // No tasks for this replica
@@ -403,15 +415,26 @@ std::vector<utils::UUID> view_building_coordinator::select_tasks_for_replica(loc
             continue;
         }
 
+        auto lol = tasks | std::views::transform([] (const view_building_task& t) {
+            return fmt::format("{}: {}", t.id, t.state);
+        }) | std::ranges::to<std::vector>();
+        vbc_logger.debug("[replica {}] tasks state for tablet {}: {}", replica, tid, lol);
+
         auto building_tasks = filter_building_tasks(tasks);
         if (!building_tasks.empty()) {
+            vbc_logger.debug("[replica {}] returning tasks to start: {}", replica, building_tasks);
             return building_tasks;
         } else {
-            return tasks | std::views::filter([] (const view_building_task& t) {
+            auto xxx = tasks | std::views::filter([] (const view_building_task& t) {
                 return t.state == view_building_task::task_state::idle;
             }) | std::views::transform([] (const view_building_task& t) {
                 return t.id;
             }) | std::ranges::to<std::vector>();
+
+            if (!xxx.empty()) {
+                vbc_logger.debug("[replica {}] returning staging tasks to start: {}", replica, xxx);
+                return xxx;
+            }
         }
     }
     vbc_logger.debug("No tasks for replica {} can be started now.", replica);
