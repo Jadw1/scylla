@@ -1280,6 +1280,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
     }
 
     future<> generate_migration_updates(utils::chunked_vector<canonical_mutation>& out, const group0_guard& guard, const migration_plan& plan) {
+        rtlogger.debug("generate_migration_updates(): finalize_resize: {} | has_nodes_to_drain: {}", plan.resize_plan().finalize_resize, plan.has_nodes_to_drain());
         if (plan.resize_plan().finalize_resize.empty() || plan.has_nodes_to_drain()) {
             // schedule tablet migration only if there are no pending resize finalisations or if the node is draining.
             for (const tablet_migration_info& mig : plan.migrations()) {
@@ -3165,7 +3166,10 @@ future<bool> topology_coordinator::maybe_start_tablet_migration(group0_guard gua
     // We only want to consider transitioning into tablet resize finalization path, if there's no other work
     // to be done (e.g. start migration or/and emit split decision).
     if (updates.empty()) {
+        rtlogger.debug("maybe_start_tablet_migration(): no migration updates, moving to resize finalization");
         co_return co_await maybe_start_tablet_resize_finalization(std::move(guard), plan.resize_plan());
+    } else {
+        rtlogger.debug("maybe_start_tablet_migration(): migration updates were generated, skipping resize finalization");
     }
 
     updates.emplace_back(
@@ -3180,6 +3184,7 @@ future<bool> topology_coordinator::maybe_start_tablet_migration(group0_guard gua
 
 future<bool> topology_coordinator::maybe_start_tablet_resize_finalization(group0_guard guard, const table_resize_plan& plan) {
     if (plan.finalize_resize.empty()) {
+        rtlogger.debug("maybe_start_tablet_resize_finalization(): finalize resize plan empty");
         co_return false;
     }
     if (utils::get_local_injector().enter("tablet_split_finalization_postpone")) {
@@ -3197,6 +3202,7 @@ future<bool> topology_coordinator::maybe_start_tablet_resize_finalization(group0
             .set_transition_state(resize_finalization_transition_state())
             .set_version(_topo_sm._topology.version + 1)
             .build());
+    rtlogger.debug("maybe_start_tablet_resize_finalization(): finalizing resize");
 
     co_await update_topology_state(std::move(guard), std::move(updates), "Started tablet resize finalization");
     co_return true;
