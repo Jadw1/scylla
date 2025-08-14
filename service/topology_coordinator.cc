@@ -1271,12 +1271,12 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 replica::tablet_mutation_builder(guard.write_timestamp(), table_id)
                     .set_resize_decision(std::move(resize_decision), _feature_service)
                     .build());
-            if (resize_decision.split_or_merge()) {
-                _vb_coordinator->abort_tasks(out, guard, table_id);
-            } else if (resize_decision.is_none() && tmap.resize_decision().split_or_merge()) {
-                // Rollback view building tasks if the resize decision was revoked
-                _vb_coordinator->rollback_aborted_tasks(out, guard, table_id);
-            }
+            // if (resize_decision.split_or_merge()) {
+            //     _vb_coordinator->abort_tasks(out, guard, table_id);
+            // } else if (resize_decision.is_none() && tmap.resize_decision().split_or_merge() && clear_state) {
+            //     // Rollback view building tasks if the resize decision was revoked
+            //     _vb_coordinator->rollback_aborted_tasks(out, guard, table_id);
+            // }
     }
 
     future<> generate_migration_updates(utils::chunked_vector<canonical_mutation>& out, const group0_guard& guard, const migration_plan& plan) {
