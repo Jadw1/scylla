@@ -62,6 +62,7 @@
 #include "compaction/compaction_manager.hh"
 #include "timestamp.hh"
 #include "utils/assert.hh"
+#include "utils/multiprecision_int.hh"
 #include "utils/small_vector.hh"
 #include "view_info.hh"
 #include "view_update_checks.hh"
@@ -2015,14 +2016,29 @@ size_t memory_usage_of(const frozen_mutation_and_schema& mut) {
 future<> view_update_generator::mutate_MV(
         schema_ptr base,
         dht::token base_token,
+        dht::decorated_key dk,
         utils::chunked_vector<frozen_mutation_and_schema> view_updates,
         db::view::stats& stats,
         replica::cf_stats& cf_stats,
         tracing::trace_state_ptr tr_state,
         db::timeout_semaphore_units pending_view_updates,
         service::allow_hints allow_hints,
-        wait_for_all_updates wait_for_all)
+        wait_for_all_updates wait_for_all, sstring origin)
 {
+    // auto bytes = dk._key.representation();
+    auto bytes_it = dk._key.components(*base);
+    auto bytes = *bytes_it.begin();
+    auto type = base->partition_key_type()->types()[0];
+    auto value = value_cast<utils::multiprecision_int>(type->deserialize(bytes));
+    // auto xoxo = value_cast<int32_t>(int32_type->deserialize(bytes));
+
+    sstring lol = "";
+    for (auto& x: view_updates) {
+        lol = fmt::format("{}, {}.{}", lol, x.s->ks_name(), x.s->cf_name());
+    }
+
+    vlogger.info("[mutate_MV] origin: {} | key: {} | views: {}", origin, value.str(), lol);
+
     auto& ks = _db.find_keyspace(base->ks_name());
     auto& replication = ks.get_replication_strategy();
     // We set legacy self-pairing for old vnode-based tables (for backward
@@ -3147,6 +3163,7 @@ public:
                     *base(),
                     _views_to_build,
                     get_current_key().token(),
+                    get_current_key(),
                     std::move(fragments_reader),
                     _now).get();
             close_reader.cancel();

@@ -755,6 +755,12 @@ future<> view_building_worker::batch::do_build_range(view_building_worker& local
         }
 
         as.check();
+
+        when_all(base_cf->await_pending_writes(), base_cf->await_pending_streams()).get();
+        flush_base(base_cf, as).get();
+        
+        as.check();
+
         std::exception_ptr eptr;
         try {
             utils::get_local_injector().inject("view_building_worker_pause_build_range_task", [&] (auto& handler) -> future<> {

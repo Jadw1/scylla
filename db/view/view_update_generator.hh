@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "dht/decorated_key.hh"
 #include "sstables/shared_sstable.hh"
 #include "db/timeout_clock.hh"
 #include "utils/chunked_vector.hh"
@@ -93,13 +94,15 @@ private:
     future<> mutate_MV(
             schema_ptr base,
             dht::token base_token,
+            dht::decorated_key dk,
             utils::chunked_vector<frozen_mutation_and_schema> view_updates,
             db::view::stats& stats,
             replica::cf_stats& cf_stats,
             tracing::trace_state_ptr tr_state,
             db::timeout_semaphore_units pending_view_updates,
             service::allow_hints allow_hints,
-            wait_for_all_updates wait_for_all);
+            wait_for_all_updates wait_for_all,
+            sstring origin);
 
     std::pair<stop_iteration, uint64_t> generate_updates_from_staging_sstables(lw_shared_ptr<replica::table> table, std::vector<sstables::shared_sstable>& sstables);
 public:
@@ -110,6 +113,7 @@ public:
     future<> populate_views(const replica::table& base,
             std::vector<view_ptr>,
             dht::token base_token,
+            dht::decorated_key dk,
             mutation_reader&&,
             gc_clock::time_point);
 

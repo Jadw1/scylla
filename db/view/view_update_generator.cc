@@ -376,6 +376,7 @@ static size_t memory_usage_of(const utils::chunked_vector<frozen_mutation_and_sc
 future<> view_update_generator::populate_views(const replica::table& table,
         std::vector<view_ptr> views,
         dht::token base_token,
+        dht::decorated_key dk,
         mutation_reader&& reader,
         gc_clock::time_point now) {
     auto schema = reader.schema();
@@ -404,8 +405,8 @@ future<> view_update_generator::populate_views(const replica::table& table,
                 err = std::make_exception_ptr(std::runtime_error("Timeout a view building update"));
                 continue;
             }
-            co_await mutate_MV(schema, base_token, std::move(*updates), table.view_stats(), *table.cf_stats(),
-                    tracing::trace_state_ptr(), std::move(units), service::allow_hints::no, wait_for_all_updates::yes);
+            co_await mutate_MV(schema, base_token, dk, std::move(*updates), table.view_stats(), *table.cf_stats(),
+                    tracing::trace_state_ptr(), std::move(units), service::allow_hints::no, wait_for_all_updates::yes, "view_build");
         } catch (...) {
             if (!err) {
                 err = std::current_exception();
@@ -454,6 +455,7 @@ future<> view_update_generator::generate_and_propagate_view_updates(const replic
         gc_clock::time_point now,
         db::timeout_clock::time_point timeout) {
     auto base_token = m.token();
+    auto dk = m.decorated_key();
     auto m_schema = m.schema();
     view_update_builder builder = make_view_update_builder(
             get_db().as_data_dictionary(),
@@ -511,8 +513,8 @@ future<> view_update_generator::generate_and_propagate_view_updates(const replic
         }
 
         try {
-            co_await mutate_MV(base, base_token, std::move(*updates), table.view_stats(), *table.cf_stats(), tr_state,
-                std::move(units), service::allow_hints::yes, wait_for_all_updates::no);
+            co_await mutate_MV(base, base_token, dk, std::move(*updates), table.view_stats(), *table.cf_stats(), tr_state,
+                std::move(units), service::allow_hints::yes, wait_for_all_updates::no, "view_update");
         } catch (...) {
             // Ignore exceptions: any individual failure to propagate a view update will be reported
             // by a separate mechanism in mutate_MV() function. Moreover, we should continue trying

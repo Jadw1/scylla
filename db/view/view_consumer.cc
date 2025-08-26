@@ -54,6 +54,7 @@ void view_consumer::flush_fragments() {
                 *base(),
                 _views_to_build,
                 get_current_key().token(),
+                get_current_key(),
                 std::move(fragments_reader),
                 _now).get();
         close_reader.cancel();
@@ -122,6 +123,7 @@ future<> flush_base(lw_shared_ptr<replica::column_family> base, abort_source& as
                 vc_logger.error("Error flushing base table {}.{}: {}; retrying", base->schema()->ks_name(), base->schema()->cf_name(), f.get_exception());
                 return { };
             }
+            std::cout << "\nFLUSHING BASE " << base->schema()->ks_name() << "." << base->schema()->cf_name() << "\n\n";
             return { empty_state{} };
         });
     }).discard_result();
