@@ -2037,7 +2037,7 @@ future<> view_update_generator::mutate_MV(
         lol = fmt::format("{}, {}.{}", lol, x.s->ks_name(), x.s->cf_name());
     }
 
-    vlogger.info("[mutate_MV] origin: {} | key: {} | views: {}", origin, value.str(), lol);
+    vlogger.info("[mutate_MV] origin: {} | key: {} | partition: {} | views: {}", origin, value.str(), dk, lol);
 
     auto& ks = _db.find_keyspace(base->ks_name());
     auto& replication = ks.get_replication_strategy();

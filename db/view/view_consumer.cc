@@ -72,6 +72,12 @@ stop_iteration view_consumer::consume_new_partition(const dht::decorated_key& dk
     check_for_built_views();
     _views_to_build.clear();
     load_views_to_build();
+
+    sstring vtb = "";
+    for (auto& x: _views_to_build) {
+        vtb = fmt::format("{}, {}.{}", vtb, x->ks_name(), x->cf_name());
+    }
+    vc_logger.info("Processing partition {} for views: {}", get_current_key(), vtb);
     return stop_iteration(_views_to_build.empty());
 }
 

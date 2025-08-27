@@ -756,8 +756,27 @@ future<> view_building_worker::batch::do_build_range(view_building_worker& local
 
         as.check();
 
-        when_all(base_cf->await_pending_writes(), base_cf->await_pending_streams()).get();
-        flush_base(base_cf, as).get();
+        sstring vs = "";
+        for (auto& [_, t]: tasks) {
+            if (t.view_id) {
+                auto sch = local_vbw._db.find_column_family(*t.view_id).schema();
+                vs = fmt::format("{}, {}.{}", vs, sch->ks_name(), sch->cf_name());
+            }
+        }
+
+        // when_all(base_cf->await_pending_writes(), base_cf->await_pending_streams()).get();
+        // flush_base(base_cf, as).get();
+
+        // seastar::sleep(std::chrono::seconds(1)).get();
+
+        local_vbw.container().invoke_on_all([base_id = base_cf->schema()->id()] (view_building_worker& xxx) -> future<> {
+            auto base_cf = xxx._db.find_column_family(base_id).shared_from_this();
+            co_await when_all(base_cf->await_pending_writes(), base_cf->await_pending_streams());
+            co_await flush_base(base_cf, xxx._as);
+        }).get();
+
+
+        vbw_logger.info("Flushed base table for views: {}", vs);
         
         as.check();
 
@@ -778,7 +797,13 @@ future<> view_building_worker::batch::do_build_range(view_building_worker& local
             }).get();
             utils::get_local_injector().inject("view_building_worker_pause_before_consume", 5min, as).get();
             
-            vbw_logger.info("Starting range {} building for base table: {}.{}", range, base_cf->schema()->ks_name(), base_cf->schema()->cf_name());
+            auto views_names = tasks | std::views::values | std::views::transform([&local_vbw] (const view_building_task& t) {
+                auto s  =local_vbw._db.find_schema(*t.view_id);
+                return fmt::format("{}.{}", s->ks_name(), s->cf_name());
+            }) | std::views::join_with(std::string_view(", "))
+                | std::ranges::to<std::string>();
+
+            vbw_logger.info("Starting range {} building for base table {}.{} and views: {}", range, base_cf->schema()->ks_name(), base_cf->schema()->cf_name(), views_names);
             auto end_token = reader.consume_in_thread(std::move(consumer));
             vbw_logger.info("Built range {} for base table: {}.{}", dht::token_range(range.start(), end_token), base_cf->schema()->ks_name(), base_cf->schema()->cf_name());
         } catch (seastar::abort_requested_exception&) {
