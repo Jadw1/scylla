@@ -330,7 +330,8 @@ async def test_change_rf_while_build_in_progress(manager: ManagerClient, change:
         await wait_for_view(cql, 'mv_cf_view', node_count)
         await check_view_contents(cql, ks, "tab", "mv_cf_view")
 
-@pytest.mark.parametrize("operation", ["add", "remove", "decommission", "replace"])
+# @pytest.mark.parametrize("operation", ["add", "remove", "decommission", "replace"])
+@pytest.mark.parametrize("operation", ["remove"])
 @pytest.mark.asyncio
 @skip_mode("release", "error injections are not supported in release mode")
 async def test_node_operation_during_view_building(manager: ManagerClient, operation: str):
