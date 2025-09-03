@@ -45,11 +45,15 @@ class view_building_worker::consumer : public view_consumer {
 
 protected:
     virtual void load_views_to_build() override {
+        std::cout << "\nLOADING VIEWS TO BUILD\n\n";
         _views_to_build = _batch.tasks | std::views::filter([this] (const auto& task_entry) {
+            std::cout << fmt::format("\nFILTER 1 ({} | {})\n\n", task_entry.second.id, *task_entry.second.view_id);
             return _db.column_family_exists(*task_entry.second.view_id);
         }) | std::views::transform([this] (const auto& task_entry) {
+            std::cout << fmt::format("\nTRANSFORM ({} | {})\n\n", task_entry.second.id, *task_entry.second.view_id);
             return view_ptr(_db.find_schema(*task_entry.second.view_id));
         }) | std::views::filter([this] (const view_ptr& view) {
+            std::cout << fmt::format("\nFILTER 2 ({})\n\n", view->id());
             return partition_key_matches(_db.as_data_dictionary(), *_reader.schema(), *view->view_info(), _current_key);
         }) | std::ranges::to<std::vector>();
     }
@@ -656,14 +660,17 @@ future<> view_building_worker::batch::start() {
 }
 
 future<> view_building_worker::batch::abort_task(utils::UUID id) {
+    std::cout << fmt::format("\nERASING TASK {}\n\n", id);
     tasks.erase(id);
     if (tasks.empty()) {
+        std::cout << "\nDO ABORT\n\n";
         co_await abort();
     }
 }
 
 future<> view_building_worker::batch::abort() {
     if (abort_sources.local_is_initialized()) {
+        std::cout << "\nINVOKING ON ALL\n\n";
         co_await abort_sources.invoke_on_all([] (abort_source& local_as) {
             if (!local_as.abort_requested()) {
                 local_as.request_abort();
@@ -720,6 +727,7 @@ future<> view_building_worker::batch::do_work() {
     }
 
     state = batch_state::finished;
+    std::cout << "\nSTOPPING ABORT SOURCES\n\n";
     co_await abort_sources.stop();
     _vbw._vb_state_machine.event.broadcast();
 }
