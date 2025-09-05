@@ -17,6 +17,7 @@
 #include "locator/tablets.hh"
 #include "seastar/core/gate.hh"
 #include "db/view/view_building_state.hh"
+#include "seastar/core/shared_ptr.hh"
 #include "sstables/shared_sstable.hh"
 #include "utils/UUID.hh"
 #include "service/migration_listener.hh"
@@ -89,6 +90,8 @@ class view_building_worker : public seastar::peering_sharded_service<view_buildi
         future<> start();
         future<> abort_task(utils::UUID id);
         future<> abort(std::optional<std::unique_lock<shared_mutex>> lock = std::nullopt);
+
+        future<std::vector<table_id>> get_views_to_build();
 
     private:
         view_building_worker& _vbw;

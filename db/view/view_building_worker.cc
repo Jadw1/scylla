@@ -21,6 +21,7 @@
 #include "db/view/view_consumer.hh"
 #include "dht/token.hh"
 #include "replica/database.hh"
+#include "seastar/core/sharded.hh"
 #include "service/storage_proxy.hh"
 #include "service/raft/raft_group0_client.hh"
 #include "schema/schema_fwd.hh"
@@ -46,18 +47,33 @@ class view_building_worker::consumer : public view_consumer {
 
 protected:
     virtual void load_views_to_build() override {
-        // The batch as its mutex lives on shard0
-        smp::submit_to(0, [this] () -> future<> {
-            return with_shared(_batch.mutex, [this] () {
-                _views_to_build = _batch.tasks | std::views::filter([this] (const auto& task_entry) {
-                    return _db.column_family_exists(*task_entry.second.view_id);
-                }) | std::views::transform([this] (const auto& task_entry) {
-                    return view_ptr(_db.find_schema(*task_entry.second.view_id));
-                }) | std::views::filter([this] (const view_ptr& view) {
-                    return partition_key_matches(_db.as_data_dictionary(), *_reader.schema(), *view->view_info(), _current_key);
-                }) | std::ranges::to<std::vector>();
-            });
+
+        // auto ids = _batch.get_views_to_build().get();
+        auto ids = smp::submit_to(0, [&] () -> future<std::vector<table_id>> {
+            return _batch.get_views_to_build();
         }).get();
+
+        _views_to_build = ids | std::views::filter([this] (const auto& id) {
+                return _db.column_family_exists(id);
+            }) | std::views::transform([this] (const auto& id) {
+                return view_ptr(_db.find_schema(id));
+            }) | std::views::filter([this] (const view_ptr& view) {
+                return partition_key_matches(_db.as_data_dictionary(), *_reader.schema(), *view->view_info(), _current_key);
+            }) | std::ranges::to<std::vector>();
+
+
+        // // The batch as its mutex lives on shard0
+        // smp::submit_to(0, [this] () -> future<> {
+        //     return with_shared(_batch->mutex, [this] () {
+        //         _views_to_build = _batch->tasks | std::views::filter([this] (const auto& task_entry) {
+        //             return _db.column_family_exists(*task_entry.second.view_id);
+        //         }) | std::views::transform([this] (const auto& task_entry) {
+        //             return view_ptr(_db.find_schema(*task_entry.second.view_id));
+        //         }) | std::views::filter([this] (const view_ptr& view) {
+        //             return partition_key_matches(_db.as_data_dictionary(), *_reader.schema(), *view->view_info(), _current_key);
+        //         }) | std::ranges::to<std::vector>();
+        //     });
+        // }).get();
     }
     virtual void check_for_built_views() override {}
 
@@ -687,6 +703,13 @@ future<> view_building_worker::batch::abort(std::optional<std::unique_lock<share
             co_await work.get_future();
         }
     }
+}
+
+future<std::vector<table_id>> view_building_worker::batch::get_views_to_build() {
+    auto lock = co_await get_shared_lock(mutex);
+    co_return tasks | std::views::transform([] (const auto& task_entry) {
+        return *task_entry.second.view_id;
+    }) | std::ranges::to<std::vector>();
 }
 
 future<> view_building_worker::batch::do_work() {
