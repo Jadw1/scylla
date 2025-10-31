@@ -90,6 +90,12 @@ std::optional<std::reference_wrapper<const view_building_task>> view_building_st
     return {};
 }
 
+std::vector<std::reference_wrapper<const view_building_task>> view_building_state::get_tasks(table_id base_id, locator::tablet_replica replica, const std::vector<utils::UUID>& id) const {
+    if (!tasks_state.contains(base_id) || !tasks_state.at(base_id).contains(replica)) {
+        return {};
+    }
+}
+
 std::vector<std::reference_wrapper<const view_building_task>> view_building_state::get_tasks_for_host(table_id base_id, locator::host_id host) const {
     if (!tasks_state.contains(base_id)) {
         return {};
