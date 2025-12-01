@@ -259,6 +259,9 @@ future<> view_building_worker::create_staging_sstable_tasks() {
                 auto unwrapped_ssts = ssts | std::views::as_rvalue | std::views::transform([] (auto&& fptr) {
                     return fptr.unwrap_on_owner_shard();
                 }) | std::ranges::to<std::vector>();
+                for (auto& sst: ssts) {
+                    std::cout << fmt::format("\n[XOX] registered {} to PROCESS\n\n", sst->toc_filename());
+                }
                 auto& tid_ssts = local_vbw._staging_sstables[tid];
                 tid_ssts.insert(tid_ssts.end(), std::make_move_iterator(unwrapped_ssts.begin()), std::make_move_iterator(unwrapped_ssts.end()));
             }
@@ -697,6 +700,9 @@ future<> view_building_worker::do_process_staging(table_id table_id, dht::token 
 
 void view_building_worker::load_sstables(table_id table_id, std::vector<sstables::shared_sstable> ssts) {
     std::ranges::copy_if(std::move(ssts), std::back_inserter(_staging_sstables[table_id]), [] (auto& sst) {
+        if (sst->state() == sstables::sstable_state::staging) {
+            std::cout << fmt::format("\n[XOX] loaded {} ???\n\n", sst->toc_filename());
+        }
         return sst->state() == sstables::sstable_state::staging;
     });
 }

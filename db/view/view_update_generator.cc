@@ -257,6 +257,9 @@ future<> view_update_generator::process_staging_sstables(lw_shared_ptr<replica::
                         utils::pretty_printed_throughput(input_size, duration));
         
         // Move staging sstables to table's base directory
+        for (auto& sst: sstables) {
+            std::cout << fmt::format("\n[XOX] PROCESSED {}\n\n", sst->toc_filename());
+        }
         table->move_sstables_from_staging(sstables).get();
     });
 }

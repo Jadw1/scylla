@@ -64,6 +64,7 @@ mutation_reader_consumer make_streaming_consumer(sstring origin,
                 schema_ptr s = reader.schema();
 
                 auto cfg = cf->get_sstables_manager().configure_writer(origin);
+                std::cout << fmt::format("\n[XOX] STREAMING CONSUMER: loaded {}\n\n", sst->toc_filename());
                 return sst->write_components(std::move(reader), adjusted_estimated_partitions, s,
                                              cfg, encoding_stats{}).then([sst] {
                     return sst->open_data();

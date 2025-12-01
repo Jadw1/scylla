@@ -56,6 +56,8 @@ static future<> load_sstable_for_tablet(const file_stream_id& ops_id, replica::d
         co_await t.add_sstable_and_update_cache(sst);
         blogger.info("stream_sstables[{}] Loaded sstable {} successfully", ops_id, sst->toc_filename());
 
+        std::cout << fmt::format("\n[XOX] STREAM BLOB: loaded {}\n\n", sst->toc_filename());
+
         if (state == sstables::sstable_state::staging) {
             // If the sstable is in staging state, register it to view building worker
             // to generate view updates from it.

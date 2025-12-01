@@ -149,6 +149,9 @@ distributed_loader::make_sstables_available(sstables::sstable_directory& dir, sh
         abort();
     });
 
+    for (auto& sst: new_sstables) {
+        std::cout << fmt::format("\n[XOX] DIST LOADER: loaded {}\n\n", sst->toc_filename());
+    }
     if (needs_view_update == db::view::sstable_destination_decision::staging_managed_by_vbc) {
         co_await vbw.local().register_staging_sstable_tasks(new_sstables, table.schema()->id());
     } else if (needs_view_update == db::view::sstable_destination_decision::staging_directly_to_generator) {
