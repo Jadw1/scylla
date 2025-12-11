@@ -2725,6 +2725,7 @@ void view_builder::on_update_view(const sstring& ks_name, const sstring& view_na
 }
 
 void view_builder::on_drop_view(const sstring& ks_name, const sstring& view_name) {
+    std::cout << fmt::format("\nDROPPING VIEW {}.{} on shard {}\n\n", ks_name, view_name, this_shard_id());
     if (should_ignore_tablet_keyspace(_db, ks_name)) {
         return;
     }
@@ -2752,7 +2753,9 @@ void view_builder::on_drop_view(const sstring& ks_name, const sstring& view_name
             // current shard, since shard 0 may have already processed the notification, and this
             // shard may since have updated the system table if the drop happened concurrently
             // with the build.
-            return _sys_ks.remove_view_build_progress(ks_name, view_name);
+            return _sys_ks.remove_view_build_progress(ks_name, view_name).then([] {
+                std::cout << fmt::format("\nREMOVED ON SHARD {}\n\n", this_shard_id());
+            });
         }
         return when_all_succeed(
                     _sys_ks.remove_view_build_progress(ks_name, view_name),
@@ -2761,8 +2764,12 @@ void view_builder::on_drop_view(const sstring& ks_name, const sstring& view_name
                         .discard_result()
                         .handle_exception([ks_name, view_name] (std::exception_ptr ep) {
             vlogger.warn("Failed to cleanup view {}.{}: {}", ks_name, view_name, ep);
+        }).then([] {
+            std::cout << fmt::format("\nREMOVED ON SHARD {}\n\n", this_shard_id());
         });
-    }).handle_exception_type([] (replica::no_such_keyspace&) {});
+    }).handle_exception_type([] (replica::no_such_keyspace&) {
+        std::cout << fmt::format("\nNO SUCH CF on shard {}\n\n", this_shard_id());
+    });
 }
 
 future<> view_builder::do_build_step() {

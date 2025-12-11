@@ -16,6 +16,8 @@
 #include "db/system_keyspace.hh"
 #include "db/config.hh"
 #include "cql3/query_options.hh"
+#include "seastar/util/log-level.hh"
+#include "utils/log.hh"
 
 #undef SEASTAR_TESTING_MAIN
 #include <seastar/testing/test_case.hh>
@@ -367,8 +369,11 @@ SEASTAR_TEST_CASE(test_builder_with_concurrent_writes) {
     });
 }
 
+static logging::logger logger("test_lol");
+
 SEASTAR_TEST_CASE(test_builder_with_concurrent_drop) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
+        logging::logger_registry().set_all_loggers_level(log_level::trace);
         auto gen = random_generator();
 
         e.execute_cql("create table cf (p blob, c int, v int, primary key (p, c))").get();
@@ -386,8 +391,22 @@ SEASTAR_TEST_CASE(test_builder_with_concurrent_drop) {
 
         e.execute_cql("drop materialized view vcf").get();
 
+        int i = 0;
         eventually([&] {
+            i++;
+            logger.warn("TRY {}", i);
+
             auto msg = e.execute_cql("select * from system.scylla_views_builds_in_progress").get();
+            
+            auto rows = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(msg);
+            logger.warn("scylla_views_builds_in_progress returned {} rows", rows->rs().result_set().size());
+            auto& lol= rows->rs().result_set().rows();
+            auto it = lol.begin();
+            for (size_t i=0; i<lol.size(); i++) {
+                logger.warn("Row {}: {}", i, *it);
+                it++;
+            }
+
             assert_that(msg).is_rows().is_empty();
             msg = e.execute_cql("select * from system.built_views").get();
             assert_that(msg).is_rows().is_empty();
@@ -395,7 +414,13 @@ SEASTAR_TEST_CASE(test_builder_with_concurrent_drop) {
             assert_that(msg).is_rows().is_empty();
             msg = e.execute_cql("select * from system_distributed.view_build_status").get();
             assert_that(msg).is_rows().is_empty();
+            logger.warn("TRY {} WAS SUCCESSFUL", i);
         }, 30);
+
+        logger.warn("FINISHED AFTER {} TRIES", i);
+        if (i > 17) {
+            throw std::runtime_error(fmt::format("The test was finished after {} tries", i));
+        }
     });
 }
 

@@ -2663,6 +2663,8 @@ future<> system_keyspace::register_view_for_building_for_all_shards(sstring ks_n
     auto timestamp = api::new_timestamp();
     mutation m{schema, partition_key::from_single_value(*schema, utf8_type->decompose(ks_name))};
 
+    slogger.warn("[LOL] registering view {}.{} progress", ks_name, view_name);
+
     for (size_t s = 0; s < smp::count; s++) {
         auto ck = clustering_key_prefix(std::vector<bytes>{
                 utf8_type->decompose(view_name),
@@ -2678,6 +2680,7 @@ future<> system_keyspace::register_view_for_building_for_all_shards(sstring ks_n
 future<> system_keyspace::update_view_build_progress(sstring ks_name, sstring view_name, const dht::token& token) {
     sstring req = format("INSERT INTO system.{} (keyspace_name, view_name, next_token, cpu_id) VALUES (?, ?, ?, ?)",
             v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS);
+    slogger.warn("[LOL] updating view {}.{} progress on shard {}", ks_name, view_name, this_shard_id());
     return execute_cql(
             std::move(req),
             std::move(ks_name),
@@ -2687,6 +2690,7 @@ future<> system_keyspace::update_view_build_progress(sstring ks_name, sstring vi
 }
 
 future<> system_keyspace::remove_view_build_progress_across_all_shards(sstring ks_name, sstring view_name) {
+    slogger.warn("[LOL] removing view {}.{} progress on all shards", ks_name, view_name);
     return execute_cql(
             format("DELETE FROM system.{} WHERE keyspace_name = ? AND view_name = ?", v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS),
             std::move(ks_name),
@@ -2694,6 +2698,8 @@ future<> system_keyspace::remove_view_build_progress_across_all_shards(sstring k
 }
 
 future<> system_keyspace::remove_view_build_progress(sstring ks_name, sstring view_name) {
+    slogger.warn("[LOL] removing view {}.{} progress on shard {}", ks_name, view_name, this_shard_id());
+    std::cout << fmt::format("\nREMOVING PROGRESS {}.{} ON SHARD {}\n\n", ks_name, view_name, this_shard_id());
     return execute_cql(
             format("DELETE FROM system.{} WHERE keyspace_name = ? AND view_name = ? AND cpu_id = ?", v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS),
             std::move(ks_name),
