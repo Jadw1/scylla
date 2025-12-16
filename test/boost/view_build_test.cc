@@ -373,7 +373,16 @@ static logging::logger logger("test_lol");
 
 SEASTAR_TEST_CASE(test_builder_with_concurrent_drop) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
-        logging::logger_registry().set_all_loggers_level(log_level::trace);
+        // logging::logger_registry().set_all_loggers_level(log_level::trace);
+        logging::logger_registry().set_logger_level("view", log_level::trace);
+        logging::logger_registry().set_logger_level("database", log_level::trace);
+        logging::logger_registry().set_logger_level("testlog", log_level::trace);
+        logging::logger_registry().set_logger_level("query_processor", log_level::trace);
+        logging::logger_registry().set_logger_level("mutation_data", log_level::trace);
+        logging::logger_registry().set_logger_level("storage_proxy", log_level::trace);
+        logging::logger_registry().set_logger_level("test_lol", log_level::trace);
+        logging::logger_registry().set_logger_level("system_keyspace", log_level::trace);
+
         auto gen = random_generator();
 
         e.execute_cql("create table cf (p blob, c int, v int, primary key (p, c))").get();

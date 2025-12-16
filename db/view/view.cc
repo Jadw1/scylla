@@ -2506,7 +2506,13 @@ future<> view_builder::calculate_shard_build_step(view_builder_init_state& vbi) 
                 && !vbi.built_views.contains(v->id());
     };
     for (auto&& view : all_views | std::views::filter(doesnt_use_tablets) | std::views::filter(is_new)) {
-        vbi.bookkeeping_ops.push_back(add_new_view(view, get_or_create_build_step(view->view_info()->base_id())));
+        vbi.bookkeeping_ops.push_back(make_ready_future().then([this, view] () {
+                std::cout << fmt::format("\n[VIEW] calculate_shard_build_step() - before add new view: {}.{}\n\n", view->ks_name(), view->cf_name());
+                return add_new_view(view, get_or_create_build_step(view->view_info()->base_id())).then([view] () {
+                    std::cout << fmt::format("\n[VIEW] calculate_shard_build_step() - after add new view: {}.{}\n\n", view->ks_name(), view->cf_name());
+                });
+            })
+        );
     }
 
     return parallel_for_each(_base_to_build_step, [this] (auto& p) {
@@ -2684,6 +2690,7 @@ void view_builder::on_create_view(const sstring& ks_name, const sstring& view_na
             // to keep around a list of new views to build the next time the reader crosses a token
             // threshold.
           return initialize_reader_at_current_token(step).then([this, view, &step] () mutable {
+            std::cout << "\n[VIEW] on_create_view() - before add new view\n\n";
             return add_new_view(view, step).then_wrapped([this, view] (future<>&& f) {
                 try {
                     f.get();
@@ -2694,6 +2701,7 @@ void view_builder::on_create_view(const sstring& ks_name, const sstring& view_na
                 } catch (...) {
                     vlogger.error("Error setting up view for building {}.{}: {}", view->ks_name(), view->cf_name(), std::current_exception());
                 }
+                std::cout << "\n[VIEW] on_create_view() - added new view\n\n";
 
                 // Waited on indirectly in stop().
                 (void)_build_step.trigger();
