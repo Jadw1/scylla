@@ -385,6 +385,19 @@ void groups_manager::update(token_metadata_ptr new_tm) {
             co_await start_raft_group(tablet, id, std::move(new_tm));
             state.server = &_raft_gr.get_server(id);
             state.leader_info_updater = leader_info_updater(state, tablet, id);
+
+            // We want to make sure the server is ready to serve requests before
+            // we report it as started in wait_for_groups_to_start().
+            while (true) {
+                auto srv = raft_server(state, state.gate->hold());
+                auto res = srv.begin_mutate();
+                if (auto w = get_if<raft_server::need_wait_for_leader>(&res)) {
+                    co_await std::move(w->future);
+                } else {
+                    break;
+                }
+            }
+
             state.unlink();
             logger.info("update(): raft server for tablet {} and group id {} is started", tablet, id);
         });
