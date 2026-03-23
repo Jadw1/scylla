@@ -79,11 +79,16 @@ public:
     }
 
     future<raft::snapshot_id> take_snapshot() override {
-        throw std::runtime_error("take_snapshot() not implemented");
+        // Until snapshot transfer is fully implemented, return a fake ID
+        // and don't actually do anything. As long as we don't do snapshot
+        // transfers (attempting to do that throws an exception), we should
+        // be safe.
+        return make_ready_future<raft::snapshot_id>(raft::snapshot_id(utils::make_random_uuid()));
     }
 
     void drop_snapshot(raft::snapshot_id id) override {
-        throw std::runtime_error("drop_snapshot() not implemented");
+        // Taking a snapshot is a no-op, so dropping a snapshot is also a no-op.
+        (void) id;
     }
 
     future<> load_snapshot(raft::snapshot_id id) override {
