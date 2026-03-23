@@ -137,6 +137,12 @@ future<> groups_manager::start_raft_group(global_tablet_id tablet,
 
     auto& persistence_ref = *storage;
     auto config = raft::server::configuration {
+        // Snapshotting is not implemented yet for strong consistency,
+        // so effectively disable periodic snapshotting.
+        // TODO: Revert after snapshots are implemented
+        .snapshot_threshold = std::numeric_limits<size_t>::max(),
+        .snapshot_threshold_log_size = 10 * 1024 * 1024, // 10MB
+        .max_log_size = 20 * 1024 * 1024, // 20MB
         .enable_forwarding = false,
         .on_background_error = [tablet, group_id](std::exception_ptr e) {
             on_internal_error(logger, 
