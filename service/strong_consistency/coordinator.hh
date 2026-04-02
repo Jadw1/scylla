@@ -10,6 +10,8 @@
 
 #include "mutation/mutation.hh"
 #include "query/query-result.hh"
+#include "utils/histogram.hh"
+#include <seastar/core/metrics.hh>
 
 namespace gms {
 
@@ -27,15 +29,35 @@ struct need_redirect {
 template <typename T = std::monostate>
 using value_or_redirect = std::variant<T, need_redirect>;
 
+struct stats {
+    utils::timed_rate_moving_average_summary_and_histogram write;
+    uint64_t write_timeouts = 0;
+    uint64_t write_status_unknown = 0;
+    uint64_t write_node_bounces = 0;
+    uint64_t write_shard_bounces = 0;
+
+    utils::timed_rate_moving_average_summary_and_histogram read;
+    uint64_t read_timeouts = 0;
+    uint64_t read_node_bounces = 0;
+    uint64_t read_shard_bounces = 0;
+
+    seastar::metrics::metric_groups _metrics;
+
+    void register_stats();
+};
+
 class coordinator : public peering_sharded_service<coordinator> {
     groups_manager& _groups_manager;
     replica::database& _db;
     gms::gossiper& _gossiper;
+    stats _stats;
 
     struct operation_ctx;
     future<value_or_redirect<operation_ctx>> create_operation_ctx(const schema& schema, const dht::token& token);
 public:
     coordinator(groups_manager& groups_manager, replica::database& db, gms::gossiper& gossiper);
+
+    stats& get_stats() { return _stats; }
 
     using mutation_gen = noncopyable_function<mutation(api::timestamp_type)>;
     future<value_or_redirect<>> mutate(schema_ptr schema, 
