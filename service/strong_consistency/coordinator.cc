@@ -170,6 +170,9 @@ future<value_or_redirect<>> coordinator::mutate(schema_ptr schema,
         const dht::token& token,
         mutation_gen&& mutation_gen)
 {
+    utils::latency_counter lc;
+    lc.start();
+
     auto op_result = co_await create_operation_ctx(*schema, token);
     if (const auto* redirect = get_if<need_redirect>(&op_result)) {
         co_return *redirect;
@@ -207,6 +210,7 @@ future<value_or_redirect<>> coordinator::mutate(schema_ptr schema,
             co_await op.raft_server.server().add_entry(std::move(raft_cmd),
                 raft::wait_type::committed,
                 nullptr);
+            _stats.write.mark(lc.stop().latency());
             co_return std::monostate{};
         } catch (...) {
             auto ex = std::current_exception();
@@ -226,6 +230,7 @@ future<value_or_redirect<>> coordinator::mutate(schema_ptr schema,
                 logger.debug("mutate(): add_entry, got commit_status_unknown {}, table {}.{}, tablet {}, term {}",
                     ex, schema->ks_name(), schema->cf_name(), op.tablet_id, term);
 
+                ++_stats.write_status_unknown;
                 // FIXME: use a dedicated ERROR_CODE instead of SERVER_ERROR
                 throw exceptions::server_exception(
                     "The outcome of this statement is unknown. It may or may not have been applied. "
@@ -245,6 +250,9 @@ auto coordinator::query(schema_ptr schema,
         db::timeout_clock::time_point timeout
     ) -> future<query_result_type>
 {
+    utils::latency_counter lc;
+    lc.start();
+
     auto op_result = co_await create_operation_ctx(*schema, ranges[0].start()->value().token());
     if (const auto* redirect = get_if<need_redirect>(&op_result)) {
         co_return *redirect;
@@ -256,6 +264,7 @@ auto coordinator::query(schema_ptr schema,
     auto [result, cache_temp] = co_await _db.query(schema, cmd,
         query::result_options::only_result(), ranges, trace_state, timeout);
 
+    _stats.read.mark(lc.stop().latency());
     co_return std::move(result);
 }
 
