@@ -462,13 +462,20 @@ std::vector<utils::UUID> view_building_coordinator::select_tasks_for_replica(loc
         auto building_tasks = filter_building_tasks(tasks);
         if (!building_tasks.empty()) {
             return building_tasks;
-        } else {
-            return tasks | std::views::filter([] (const view_building_task& t) {
-                return !t.aborted;
-            }) | std::views::transform([] (const view_building_task& t) {
-                return t.id;
-            }) | std::ranges::to<std::vector>();
         }
+
+        // No non-aborted build_range tasks, try non-aborted tasks of any type.
+        auto non_aborted_tasks = tasks | std::views::filter([] (const view_building_task& t) {
+            return !t.aborted;
+        }) | std::views::transform([] (const view_building_task& t) {
+            return t.id;
+        }) | std::ranges::to<std::vector>();
+        if (!non_aborted_tasks.empty()) {
+            return non_aborted_tasks;
+        }
+
+        // All tasks for this tablet are aborted; try the next tablet.
+        vbc_logger.debug("All tasks for tablet {} on replica {} are aborted, trying next tablet.", tid, replica);
     }
     vbc_logger.debug("No tasks for replica {} can be started now.", replica);
     return {};
