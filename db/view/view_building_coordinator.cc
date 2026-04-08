@@ -126,6 +126,30 @@ future<> view_building_coordinator::run() {
             }
 
             co_await work_on_view_building(std::move(*guard_opt));
+
+            // Periodic progress summary at INFO level.
+            auto now = lowres_clock::now();
+            if (now - _last_progress_log >= std::chrono::seconds(60)) {
+                _last_progress_log = now;
+                size_t total_tasks = 0;
+                size_t total_replicas = 0;
+                if (_vb_sm.building_state.currently_processed_base_table) {
+                    auto base_id = *_vb_sm.building_state.currently_processed_base_table;
+                    if (_vb_sm.building_state.tasks_state.contains(base_id)) {
+                        for (auto& [_, replica_tasks]: _vb_sm.building_state.tasks_state.at(base_id)) {
+                            ++total_replicas;
+                            for (auto& [__, tm]: replica_tasks.view_tasks) {
+                                total_tasks += tm.size();
+                            }
+                            total_tasks += replica_tasks.staging_tasks.size();
+                        }
+                    }
+                }
+                vbc_logger.info("View building progress: base_table={}, remaining_tasks={}, replicas_with_tasks={}, in_flight_rpcs={}",
+                    _vb_sm.building_state.currently_processed_base_table,
+                    total_tasks, total_replicas, _remote_work.size());
+            }
+
             co_await await_event();
         } catch (...) {
             handle_coordinator_error(std::current_exception());

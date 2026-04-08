@@ -10,6 +10,7 @@
 #pragma once
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/lowres_clock.hh>
 #include "db/system_keyspace.hh"
 #include "locator/tablets.hh"
 #include "mutation/canonical_mutation.hh"
@@ -57,6 +58,7 @@ class view_building_coordinator : public service::endpoint_lifecycle_subscriber 
     std::unordered_map<locator::tablet_replica, shared_future<std::optional<std::vector<utils::UUID>>>> _remote_work;
     shared_mutex _mutex; // guards `_finished_tasks` field
     std::unordered_map<locator::tablet_replica, std::unordered_set<utils::UUID>> _finished_tasks;
+    lowres_clock::time_point _last_progress_log = lowres_clock::now();
 
 public:
     view_building_coordinator(replica::database& db, raft::server& raft, service::raft_group0& group0,
