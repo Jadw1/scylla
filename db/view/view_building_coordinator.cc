@@ -87,7 +87,7 @@ void view_building_coordinator::handle_coordinator_error(std::exception_ptr eptr
     } catch (raft::request_aborted&) {
         vbc_logger.debug("view building coordinator got raft::request_aborted");
     } catch (service::term_changed_error&) {
-        vbc_logger.debug("view building coordinator notices term change {} -> {}", _term, _raft.get_current_term());
+        vbc_logger.info("view building coordinator notices term change {} -> {}", _term, _raft.get_current_term());
     } catch (raft::commit_status_unknown&) {
         vbc_logger.warn("view building coordinator got raft::commit_status_unknown");
     } catch (...) {
@@ -100,6 +100,8 @@ void view_building_coordinator::on_up(const gms::inet_address& endpoint, locator
 }
 
 future<> view_building_coordinator::run() {
+    vbc_logger.info("View building coordinator started, term {}", _term);
+
     auto abort = _as.subscribe([this] noexcept {
         _vb_sm.event.broadcast();
     });
@@ -367,10 +369,17 @@ future<> view_building_coordinator::work_on_view_building(service::group0_guard 
     // Acquire unique lock of `_finished_tasks` to ensure each replica has its own entry in it
     // and to select tasks for them.
     auto lock = co_await get_unique_lock(_mutex);
-    for (auto& replica: get_replicas_with_tasks()) {
+    auto replicas = get_replicas_with_tasks();
+    size_t dispatched = 0;
+    size_t dead_replicas = 0;
+    size_t busy_replicas = 0;
+    size_t no_tasks_replicas = 0;
+
+    for (auto& replica: replicas) {
         if (_remote_work.contains(replica)) {
             if (!_remote_work[replica].available()) {
                 vbc_logger.debug("Replica {} is still doing work", replica);
+                ++busy_replicas;
                 continue;
             }
 
@@ -381,6 +390,7 @@ future<> view_building_coordinator::work_on_view_building(service::group0_guard 
         const bool ignore_gossiper = utils::get_local_injector().enter("view_building_coordinator_ignore_gossiper");
         if (!_gossiper.is_alive(replica.host) && !ignore_gossiper) {
             vbc_logger.debug("Replica {} is dead", replica);
+            ++dead_replicas;
             continue;
         }
 
@@ -390,10 +400,16 @@ future<> view_building_coordinator::work_on_view_building(service::group0_guard 
 
         if (auto todo_ids = select_tasks_for_replica(replica); !todo_ids.empty()) {
             start_remote_worker(replica, std::move(todo_ids));
+            ++dispatched;
         } else {
             vbc_logger.debug("Nothing to do for replica {}", replica);
+            ++no_tasks_replicas;
         }
     }
+
+    vbc_logger.info("View building dispatch for base table {}: {} replicas total, {} dispatched, {} busy, {} dead, {} idle",
+        *_vb_sm.building_state.currently_processed_base_table,
+        replicas.size(), dispatched, busy_replicas, dead_replicas, no_tasks_replicas);
 }
 
 std::set<locator::tablet_replica> view_building_coordinator::get_replicas_with_tasks() {
