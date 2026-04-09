@@ -129,7 +129,7 @@ future<> view_building_coordinator::run() {
 
             // Periodic progress summary at INFO level.
             auto now = lowres_clock::now();
-            if (now - _last_progress_log >= std::chrono::seconds(60)) {
+            if (now - _last_progress_log >= std::chrono::seconds(600)) {
                 _last_progress_log = now;
                 size_t total_tasks = 0;
                 size_t total_replicas = 0;
