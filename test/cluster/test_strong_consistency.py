@@ -229,6 +229,21 @@ async def test_basic_write_read(manager: ManagerClient):
         assert row.pk == 10
         assert row.c == 70
 
+        logger.info("Verify metrics are collected on leader host")
+        leader_metrics = await manager.metrics.query(leader_host.address)
+        assert (leader_metrics.get('scylla_strong_consistency_write_latency_count') or 0) > 0
+        assert (leader_metrics.get('scylla_strong_consistency_read_latency_count') or 0) > 0
+        
+        logger.info("Verify metrics are collected on non-leader replica host")
+        non_leader_metrics = await manager.metrics.query(non_leader_replica_host.address)
+        assert (non_leader_metrics.get('scylla_strong_consistency_write_node_bounces') or 0) > 0
+        assert (non_leader_metrics.get('scylla_strong_consistency_read_latency_count') or 0) > 0
+
+        logger.info("Verify metrics are collected on non-replica host")
+        non_replica_metrics = await manager.metrics.query(non_replica_host.address)
+        assert (non_replica_metrics.get('scylla_strong_consistency_write_node_bounces') or 0) > 0
+        assert (non_replica_metrics.get('scylla_strong_consistency_read_node_bounces') or 0) > 0
+
         # Check that we can restart a server with an active tablets raft group
         await manager.server_restart(servers[2].server_id)
 
