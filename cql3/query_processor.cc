@@ -1286,11 +1286,13 @@ shared_ptr<cql_transport::messages::result_message> query_processor::bounce_to_s
         _proxy.get_stats().replica_cross_shard_ops++;
     }
     const auto my_host_id = _proxy.get_token_metadata_ptr()->get_topology().my_host_id();
+    log.info("Creating bounce-to-shard result for host {} shard {} track={}", my_host_id, shard, track);
     return ::make_shared<cql_transport::messages::result_message::bounce>(my_host_id, shard, std::move(cached_fn_calls));
 }
 
 shared_ptr<cql_transport::messages::result_message> query_processor::bounce_to_node(locator::tablet_replica replica, cql3::computed_function_values cached_fn_calls, seastar::lowres_clock::time_point timeout, bool is_write) {
     get_cql_stats().forwarded_requests++;
+    log.info("Creating bounce-to-node result for host {} shard {} is_write={}", replica.host, replica.shard, is_write);
     return ::make_shared<cql_transport::messages::result_message::bounce>(replica.host, replica.shard, std::move(cached_fn_calls), timeout, is_write);
 }
 

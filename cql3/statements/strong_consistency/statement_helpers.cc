@@ -14,7 +14,11 @@
 #include "locator/tablet_replication_strategy.hh"
 #include "service/strong_consistency/coordinator.hh"
 
+#include <seastar/util/log.hh>
+
 namespace cql3::statements::strong_consistency {
+static logging::logger sc_routing_logger("sc_routing");
+
 future<::shared_ptr<cql_transport::messages::result_message>> redirect_statement(query_processor& qp,
         const query_options& options,
         const locator::tablet_replica& target,
@@ -25,9 +29,20 @@ future<::shared_ptr<cql_transport::messages::result_message>> redirect_statement
     auto&& func_values_cache = const_cast<cql3::query_options&>(options).take_cached_pk_function_calls();
     const auto my_host_id = qp.db().real_database().get_token_metadata().get_topology().my_host_id();
     if (target.host != my_host_id) {
+        sc_routing_logger.info(
+            "Strong-consistency redirect selecting remote target host={} shard={} from local host={} for {} request",
+            target.host,
+            target.shard,
+            my_host_id,
+            is_write ? "write" : "read");
         ++(is_write ? stats.write_node_bounces : stats.read_node_bounces);
         co_return qp.bounce_to_node(target, std::move(func_values_cache), timeout, is_write);
     }
+    sc_routing_logger.info(
+        "Strong-consistency redirect selecting local shard bounce to shard={} on host={} for {} request",
+        target.shard,
+        my_host_id,
+        is_write ? "write" : "read");
     ++(is_write ? stats.write_shard_bounces : stats.read_shard_bounces);
     co_return qp.bounce_to_shard(target.shard, std::move(func_values_cache));
 }

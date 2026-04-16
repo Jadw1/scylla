@@ -1544,7 +1544,12 @@ process_query_internal(service::client_state& client_state, sharded<cql3::query_
 
     return qp.local().execute_direct_without_checking_exception_message(query.assume_value(), query_state, dialect, options).then([q_state = std::move(q_state), stream, skip_metadata, version] (auto msg) {
         if (msg->as_bounce()) {
-            return cql_server::process_fn_return_type(make_foreign(static_pointer_cast<messages::result_message::bounce>(msg)));
+            auto bounce = static_pointer_cast<messages::result_message::bounce>(msg);
+            clogger.info(
+                "Query request produced bounce to host {} shard {}",
+                bounce->target_host(),
+                bounce->target_shard());
+            return cql_server::process_fn_return_type(make_foreign(std::move(bounce)));
         } else if (msg->is_exception()) {
             return cql_server::process_fn_return_type(convert_error_message_to_coordinator_result(msg.get()));
         } else {
@@ -1662,7 +1667,12 @@ process_execute_internal(service::client_state& client_state, sharded<cql3::quer
     return qp.local().execute_prepared_without_checking_exception_message(query_state, std::move(stmt), options, std::move(prepared), std::move(cache_key), needs_authorization)
             .then([trace_state = query_state.get_trace_state(), skip_metadata, q_state = std::move(q_state), stream, version, metadata_id = std::move(metadata_id)] (auto msg) mutable {
         if (msg->as_bounce()) {
-            return cql_server::process_fn_return_type(make_foreign(static_pointer_cast<messages::result_message::bounce>(msg)));
+            auto bounce = static_pointer_cast<messages::result_message::bounce>(msg);
+            clogger.info(
+                "Execute request produced bounce to host {} shard {}",
+                bounce->target_host(),
+                bounce->target_shard());
+            return cql_server::process_fn_return_type(make_foreign(std::move(bounce)));
         } else if (msg->is_exception()) {
             return cql_server::process_fn_return_type(convert_error_message_to_coordinator_result(msg.get()));
         } else {
@@ -1801,7 +1811,12 @@ process_batch_internal(service::client_state& client_state, sharded<cql3::query_
     return qp.local().execute_batch_without_checking_exception_message(batch, query_state, options, std::move(pending_authorization_entries))
             .then([stream, batch, q_state = std::move(q_state), trace_state = query_state.get_trace_state(), version] (auto msg) {
         if (msg->as_bounce()) {
-            return cql_server::process_fn_return_type(make_foreign(static_pointer_cast<messages::result_message::bounce>(msg)));
+            auto bounce = static_pointer_cast<messages::result_message::bounce>(msg);
+            clogger.info(
+                "Batch request produced bounce to host {} shard {}",
+                bounce->target_host(),
+                bounce->target_shard());
+            return cql_server::process_fn_return_type(make_foreign(std::move(bounce)));
         } else if (msg->is_exception()) {
             return cql_server::process_fn_return_type(convert_error_message_to_coordinator_result(msg.get()));
         } else {
@@ -1855,6 +1870,7 @@ cql_server::process(uint16_t stream, request_reader in, service::client_state& c
         auto my_host_id = _query_processor.local().proxy().get_token_metadata_ptr()->get_topology().my_host_id();
         if (target_host == my_host_id) {
             // Shard bounce
+            clogger.info("Handling shard bounce locally to shard {} on host {}", shard, my_host_id);
             auto sg = _config.bounce_request_smp_service_group;
             auto gcs = client_state.move_to_other_shard();
             auto gt = tracing::global_trace_state_ptr(trace_state);
@@ -1871,9 +1887,18 @@ cql_server::process(uint16_t stream, request_reader in, service::client_state& c
             if (bounced) {
                 // If we already bounced between nodes, return the bounce message to the caller
                 // to return a 'redirect' response to the bouncing node instead of bouncing again.
+                clogger.info(
+                    "Returning redirect bounce to caller for host {} shard {} after previous node bounce",
+                    target_host,
+                    shard);
                 co_return std::move(msg);
             }
 
+            clogger.info(
+                "Handling node bounce by forwarding to host {} shard {} from host {}",
+                target_host,
+                shard,
+                my_host_id);
             tracing::trace(trace_state, "Forwarding to node {} shard {}", target_host, shard);
 
             auto request_bytes = copy_istream(is);
