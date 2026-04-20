@@ -51,6 +51,8 @@ future<shared_ptr<result_message>> modification_statement::execute_without_check
         throw exceptions::invalid_request_exception("Strongly consistent queries don't support user-provided timestamps");
     }
 
+    std::cout << fmt::format("\n[LOL] mutating table {}.{}\n\n", _statement->s->ks_name(), _statement->s->cf_name());
+
     auto [coordinator, holder] = qp.acquire_strongly_consistent_coordinator();
 
     const auto mutate_result = co_await coordinator.get().mutate(_statement->s,

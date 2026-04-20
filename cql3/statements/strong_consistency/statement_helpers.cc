@@ -8,6 +8,7 @@
 
 #include "statement_helpers.hh"
 
+#include "seastar/core/shard_id.hh"
 #include "transport/messages/result_message_base.hh"
 #include "cql3/query_processor.hh"
 #include "replica/database.hh"
@@ -36,6 +37,7 @@ future<::shared_ptr<cql_transport::messages::result_message>> redirect_statement
             my_host_id,
             is_write ? "write" : "read");
         ++(is_write ? stats.write_node_bounces : stats.read_node_bounces);
+        std::cout << fmt::format("\n[LOL] bouncing to host {}\n\n", target);
         co_return qp.bounce_to_node(target, std::move(func_values_cache), timeout, is_write);
     }
     sc_routing_logger.info(
@@ -44,6 +46,7 @@ future<::shared_ptr<cql_transport::messages::result_message>> redirect_statement
         my_host_id,
         is_write ? "write" : "read");
     ++(is_write ? stats.write_shard_bounces : stats.read_shard_bounces);
+    std::cout << fmt::format("\n[LOL] bouncing from shard {} to shard {}\n\n", this_shard_id(), target.shard);
     co_return qp.bounce_to_shard(target.shard, std::move(func_values_cache));
 }
 

@@ -275,7 +275,8 @@ batch_size_fail_threshold_in_kb: 1024
 # broadcast_rpc_address: 1.2.3.4
 
 # Uncomment to enable experimental features
-# experimental_features:
+experimental_features:
+-  strongly-consistent-tables
 #     - udf
 #     - alternator-streams
 #     - broadcast-tables
