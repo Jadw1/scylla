@@ -18,6 +18,8 @@
 #include "schema/schema_builder.hh"
 #include "sstables/sstables_manager.hh"
 #include <optional>
+#include <seastar/core/file.hh>
+#include <seastar/core/fstream.hh>
 #include <stdexcept>
 #include <time.h>
 #include <algorithm>
@@ -38,6 +40,8 @@
 #include <seastar/http/exception.hh>
 #include <seastar/http/short_streams.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/async_profiler.hh>
+#include <seastar/core/smp.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 #include <seastar/coroutine/exception.hh>
 #include "repair/row_level.hh"
@@ -1943,6 +1947,47 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
     ss::quiesce_topology.set(r, rest_bind(rest_quiesce_topology, ss));
     sp::get_schema_versions.set(r, rest_bind(rest_get_schema_versions, ss));
     ss::drop_quarantined_sstables.set(r, rest_bind(rest_drop_quarantined_sstables, ctx, ss));
+
+    ss::start_async_profiler.set(r, [](std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+        auto interval_str = req->get_query_param("sampling_interval_ms");
+        unsigned interval_ms = 100;
+        if (!interval_str.empty()) {
+            interval_ms = std::stoi(interval_str);
+            if (interval_ms == 0) {
+                throw httpd::bad_param_exception("sampling_interval_ms must be > 0");
+            }
+        }
+        co_await smp::invoke_on_all([interval_ms] {
+            seastar::get_async_profiler().start(interval_ms);
+        });
+        co_return json::json_return_type(json_void());
+    });
+
+    ss::stop_async_profiler.set(r, [](std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+        co_await smp::invoke_on_all([] {
+            seastar::get_async_profiler().stop();
+        });
+        co_return json::json_return_type(json_void());
+    });
+
+    ss::dump_async_profiler.set(r, [](std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+        auto filename = req->get_query_param("filename");
+        if (filename.empty()) {
+            throw httpd::bad_param_exception("filename is required");
+        }
+        // Each shard writes its own file: filename.0, filename.1, ...
+        // Caller merges with: cat filename.* | flamegraph.pl > out.svg
+        co_await smp::invoke_on_all([&filename] () -> future<> {
+            auto path = fmt::format("{}.{}", filename, this_shard_id());
+            auto f = co_await open_file_dma(path,
+                open_flags::wo | open_flags::create | open_flags::truncate);
+            auto out = co_await make_file_output_stream(f);
+            co_await seastar::get_async_profiler().dump_and_reset(out);
+            co_await out.flush();
+            co_await out.close();
+        });
+        co_return json::json_return_type(json_void());
+    });
 }
 
 void unset_storage_service(http_context& ctx, routes& r) {
@@ -2026,6 +2071,9 @@ void unset_storage_service(http_context& ctx, routes& r) {
     ss::quiesce_topology.unset(r);
     sp::get_schema_versions.unset(r);
     ss::drop_quarantined_sstables.unset(r);
+    ss::start_async_profiler.unset(r);
+    ss::stop_async_profiler.unset(r);
+    ss::dump_async_profiler.unset(r);
 }
 
 void set_load_meter(http_context& ctx, routes& r, service::load_meter& lm) {
