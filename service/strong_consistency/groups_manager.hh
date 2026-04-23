@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <seastar/core/scheduling.hh>
 #include "locator/abstract_replication_strategy.hh"
 #include "message/messaging_service.hh"
 #include "service/raft/raft_group_registry.hh"
@@ -86,6 +87,11 @@ class groups_manager : public peering_sharded_service<groups_manager> {
     gms::feature_service& _features;
     db::raft_commitlog_replay_buffer& _raft_replay_buffer;
     gms::gossiper& _gossiper;
+    // Scheduling group used for the per-group raft::server fibers
+    // (applier, io, ticker, RPC) and for the per-group leader_info_updater
+    // background fiber. All work performed inside state_machine::apply()
+    // and related state machine callbacks inherits this scheduling group.
+    seastar::scheduling_group _sg;
     std::unordered_map<raft::group_id, raft_group_state> _raft_groups = {};
     boost::intrusive::list<raft_group_state, boost::intrusive::constant_time_size<false>> _starting_groups;
     locator::token_metadata_ptr _pending_tm = nullptr;
@@ -108,7 +114,8 @@ class groups_manager : public peering_sharded_service<groups_manager> {
 public:
     groups_manager(netw::messaging_service& ms, raft_group_registry& raft_gr,
         cql3::query_processor& qp, replica::database& _db, service::migration_manager& mm, db::system_keyspace& sys_ks,
-        gms::feature_service& features, db::raft_commitlog_replay_buffer& raft_replay_buffer, gms::gossiper& gossiper);
+        gms::feature_service& features, db::raft_commitlog_replay_buffer& raft_replay_buffer, gms::gossiper& gossiper,
+        seastar::scheduling_group sg);
 
     // Called whenever a new token_metadata is published on this shard.
     // Starts raft::server instances for all strongly consistent tablets now

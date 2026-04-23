@@ -1928,7 +1928,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             sharded<service::strong_consistency::groups_manager> groups_manager;
             groups_manager.start(std::ref(messaging), std::ref(raft_gr), std::ref(qp), 
                 std::ref(db), std::ref(mm), std::ref(sys_ks), std::ref(feature_service),
-                std::ref(raft_replay_buffer), std::ref(gossiper)).get();
+                std::ref(raft_replay_buffer), std::ref(gossiper),
+                sl_controller.local().get_default_scheduling_group()).get();
             auto stop_groups_manager = defer_verbose_shutdown("strongly consistent groups manager", [&] {
                 groups_manager.stop().get();
             });
