@@ -18,6 +18,8 @@
 #include "idl/raft_util.dist.hh"
 #include "utils/composite_abort_source.hh"
 #include "utils/error_injection.hh"
+#include "utils/histogram_metrics_helper.hh"
+#include <seastar/core/metrics.hh>
 #include <seastar/core/shared_future.hh>
 
 #include <chrono>
@@ -88,6 +90,25 @@ raft_group_registry::raft_group_registry(
     , _direct_fd_proxy(make_shared<direct_fd_proxy>(my_id))
     , _my_id(my_id)
 {
+    register_sc_metrics();
+}
+
+void raft_group_registry::register_sc_metrics() {
+    namespace sm = seastar::metrics;
+    _sc_metric_groups.add_group("raft_strong_consistency", {
+        sm::make_histogram("memory_permit_wait_latency",
+            sm::description("Time waiting for the in-flight commands semaphore in raft::server::add_entry_on_leader (microseconds). Aggregated across all SC raft servers on this shard."),
+            {}, [this] { return to_metrics_histogram(_sc_metrics.memory_permit_wait_latency); }),
+        sm::make_histogram("store_log_entries_latency",
+            sm::description("Leader-side WAL write latency for a batch of log entries in raft::server io_fiber (microseconds). Aggregated across all SC raft servers on this shard."),
+            {}, [this] { return to_metrics_histogram(_sc_metrics.store_log_entries_latency); }),
+        sm::make_histogram("replication_latency",
+            sm::description("Leader replication round-trip: from end of persist+send in io_fiber to commit notification in applier_fiber (microseconds). Aggregated across all SC raft servers on this shard."),
+            {}, [this] { return to_metrics_histogram(_sc_metrics.replication_latency); }),
+        sm::make_histogram("io_fiber_dispatch_latency",
+            sm::description("Latency from raft::server::add_entry on the leader to io_fiber picking the entry up in process_fsm_output (microseconds). Aggregated across all SC raft servers on this shard."),
+            {}, [this] { return to_metrics_histogram(_sc_metrics.io_fiber_dispatch_latency); }),
+    });
 }
 
 void raft_group_registry::init_rpc_verbs() {
