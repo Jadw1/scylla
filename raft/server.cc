@@ -234,6 +234,19 @@ private:
 
     server_requests _new_server_requests;
 
+    // Per-entry timestamps used to compute Tier 1 latency histograms.
+    // Both maps are populated only on the leader; entries are erased
+    // when the corresponding latency is recorded or when the leader
+    // gives up tracking (drop_waiters / leadership change).
+    using clock_type = std::chrono::steady_clock;
+    // Recorded in add_entry_on_leader right after _fsm->add_entry, used
+    // to measure io_fiber dispatch latency in process_fsm_output.
+    std::map<index_t, clock_type::time_point> _entry_added_times;
+    // Recorded in process_fsm_output after store_log_entries +
+    // send_message returned, used to measure replication latency in
+    // notify_waiters(_awaited_commits, ...).
+    std::map<index_t, clock_type::time_point> _entry_sent_times;
+
     // Called to commit entries (on a leader or otherwise).
     void notify_waiters(std::map<index_t, op_status>& waiters, const log_entry_ptr_list& entries);
 
@@ -660,6 +673,9 @@ future<> server_impl::wait_for_entry(entry_id eid, wait_type type, seastar::abor
 future<entry_id> server_impl::add_entry_on_leader(command cmd, seastar::abort_source* as) {
     // Wait for sufficient memory to become available
     semaphore_units<> memory_permit;
+    auto* sc_m = _config.sc_metrics_target;
+    const auto memory_permit_wait_start = sc_m
+        ? clock_type::now() : clock_type::time_point{};
     while (true) {
         term_t t = _fsm->get_current_term();
         try {
@@ -676,10 +692,22 @@ future<entry_id> server_impl::add_entry_on_leader(command cmd, seastar::abort_so
         }
         memory_permit.release();
     }
+    if (sc_m) {
+        sc_m->memory_permit_wait_latency.add(clock_type::now() - memory_permit_wait_start);
+    }
     logger.trace("[{}] adding entry after waiting for memory permit", id());
 
     try {
         const log_entry& e = _fsm->add_entry(std::move(cmd));
+        if (sc_m) {
+            // Record the time at which the entry was appended to the
+            // in-memory log so that io_fiber can measure dispatch
+            // latency. Tracked only on the leader; followers receive
+            // entries through append_entries and the timestamp would
+            // not be meaningful for them. Only stored when SC phase
+            // metrics are enabled (group0 leaves the map empty).
+            _entry_added_times.emplace(e.idx, clock_type::now());
+        }
         memory_permit.release();
         co_return entry_id{.term = e.term, .idx = e.idx};
     } catch (const not_a_leader&) {
@@ -1010,6 +1038,20 @@ void server_impl::drop_waiters(std::optional<index_t> idx) {
     };
     drop(_awaited_commits);
     drop(_awaited_applies);
+
+    // Drop any tracked timestamps for entries we are no longer going to
+    // notify a waiter for. They would otherwise either accumulate
+    // indefinitely (if we lost leadership) or skew the histogram with
+    // misleading large latencies once a future leader catches up.
+    auto drop_times = [&] (std::map<index_t, clock_type::time_point>& times) {
+        if (idx) {
+            times.erase(times.begin(), times.upper_bound(*idx));
+        } else {
+            times.clear();
+        }
+    };
+    drop_times(_entry_added_times);
+    drop_times(_entry_sent_times);
 }
 
 void server_impl::signal_applied() {
@@ -1153,9 +1195,33 @@ future<> server_impl::process_fsm_output(index_t& last_stable, fsm_output&& batc
         utils::get_local_injector().inject("store_log_entries/test-failure",
             [] { throw std::runtime_error("store_log_entries/test-failure"); });
 
+        auto* sc_m = _config.sc_metrics_target;
+
+        // Tier 1 metric: io_fiber dispatch latency. For each entry that
+        // was added by add_entry_on_leader on this server, measure the time
+        // between append-to-in-memory-log and being picked up here. We do
+        // this just before store_log_entries so the histogram excludes WAL
+        // time (which is reported separately).
+        if (sc_m) {
+            const auto now_dispatch = clock_type::now();
+            for (const auto& e : entries) {
+                auto it = _entry_added_times.find(e->idx);
+                if (it != _entry_added_times.end()) {
+                    sc_m->io_fiber_dispatch_latency.add(now_dispatch - it->second);
+                    _entry_added_times.erase(it);
+                }
+            }
+        }
+
+        // Tier 1 metric: leader WAL write.
+        const auto store_log_start = sc_m
+            ? clock_type::now() : clock_type::time_point{};
         // Combine saving and truncating into one call?
         // will require persistence to keep track of last idx
         co_await _persistence->store_log_entries(entries);
+        if (sc_m) {
+            sc_m->store_log_entries_latency.add(clock_type::now() - store_log_start);
+        }
 
         last_stable = (*entries.crbegin())->idx;
         _stats.persisted_log_entries += entries.size();
@@ -1184,6 +1250,21 @@ future<> server_impl::process_fsm_output(index_t& last_stable, fsm_output&& batc
         } catch(...) {
             // Not being able to send a message is not a critical error
             logger.debug("[{}] io_fiber failed to send a message to {}: {}", _id, m.first, std::current_exception());
+        }
+    }
+
+    // Tier 1 metric: replication round-trip start. Record the time at
+    // which the leader has finished persisting and dispatching this batch
+    // of log entries; the corresponding latency is recorded when the
+    // commit notification fires in notify_waiters(_awaited_commits, ...).
+    // Tracked only on the leader and only when SC metrics are enabled.
+    if (_config.sc_metrics_target && batch.log_entries.size() && _fsm->is_leader()) {
+        const auto now_sent = clock_type::now();
+        for (const auto& e : batch.log_entries) {
+            // emplace is a no-op if a previous append for the same index is
+            // still being tracked (e.g. retransmission); keep the earlier
+            // timestamp in that case.
+            _entry_sent_times.emplace(e->idx, now_sent);
         }
     }
 
@@ -1361,6 +1442,23 @@ future<> server_impl::applier_fiber() {
                 // be notified before an earlier snapshot is applied do both
                 // notification and snapshot application in the same fiber
                 notify_waiters(_awaited_commits, batch);
+
+                // Tier 1 metric: replication round-trip end. For each
+                // entry committed in this batch, look up the timestamp
+                // recorded by io_fiber after sending append_entries and
+                // record the elapsed time. Also drop any stale timestamps
+                // for indices <= the last committed index (e.g. entries
+                // that were superseded by a new leader and never reached
+                // their waiter through this path).
+                if (auto* sc_m = _config.sc_metrics_target) {
+                    const auto now_committed = clock_type::now();
+                    const index_t last_committed = batch.back()->idx;
+                    auto it = _entry_sent_times.begin();
+                    while (it != _entry_sent_times.end() && it->first <= last_committed) {
+                        sc_m->replication_latency.add(now_committed - it->second);
+                        it = _entry_sent_times.erase(it);
+                    }
+                }
 
                 log_entry_ptr_list commands;
                 commands.reserve(batch.size());

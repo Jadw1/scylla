@@ -8,6 +8,7 @@
 #pragma once
 #include <seastar/core/abort_source.hh>
 #include "raft.hh"
+#include "utils/estimated_histogram.hh"
 
 namespace raft {
 
@@ -19,6 +20,13 @@ enum class wait_type {
 // A single uniquely identified participant of a Raft group.
 class server {
 public:
+    struct sc_metrics {
+        utils::time_estimated_histogram memory_permit_wait_latency;
+        utils::time_estimated_histogram store_log_entries_latency;
+        utils::time_estimated_histogram replication_latency;
+        utils::time_estimated_histogram io_fiber_dispatch_latency;
+    };
+
     struct configuration {
         // automatically snapshot state machine after applying
         // this number of entries
@@ -63,6 +71,8 @@ public:
         // A callback to invoke if one of internal server
         // background activities has stopped because of an error.
         std::function<void(std::exception_ptr e)> on_background_error;
+
+        sc_metrics* sc_metrics_target = nullptr;
     };
 
     virtual ~server() {}

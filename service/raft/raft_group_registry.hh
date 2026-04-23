@@ -9,6 +9,7 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/metrics_registration.hh>
 
 #include "message/messaging_service_fwd.hh"
 #include "raft/raft.hh"
@@ -131,6 +132,11 @@ private:
     raft::server_id _my_id;
 
     bool _group0_is_alive = false;
+
+    raft::server::sc_metrics _sc_metrics;
+    seastar::metrics::metric_groups _sc_metric_groups;
+
+    void register_sc_metrics();
 public:
     raft_group_registry(raft::server_id my_id, netw::messaging_service& ms,
             direct_failure_detector::failure_detector& fd);
@@ -170,6 +176,8 @@ public:
 
     // Returns the list of all Raft groups on this shard by their IDs.
     std::vector<raft::group_id> all_groups() const;
+
+    raft::server::sc_metrics* sc_metrics() noexcept { return &_sc_metrics; }
 
     // Return an instance of group 0. Valid only on shard 0,
     // after boot/upgrade is complete
