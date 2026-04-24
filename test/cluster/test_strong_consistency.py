@@ -20,12 +20,18 @@ from test.pylib.tablets import get_all_tablet_replicas, get_tablet_replicas
 from test.pylib.rest_client import read_barrier
 
 import asyncio
+import bisect
+import glob
+import os
 import pytest
 import logging
 import time
 import uuid
 import random
+import struct
 import asyncio
+
+from cassandra.murmur3 import murmur3
 
 
 logger = logging.getLogger(__name__)
@@ -1893,3 +1899,140 @@ async def test_crash_recovery_after_flush(manager: ManagerClient):
             assert rows[0].c == pk * 10, f"pk={pk}: expected c={pk * 10}, got c={rows[0].c}"
 
     await manager.server_stop_gracefully(server.server_id)
+
+
+@pytest.mark.asyncio
+async def test_task_profiler(manager: ManagerClient):
+    """Verify that the async profiler captures multi-frame folded stacks
+    under sustained strongly-consistent write workload."""
+
+    servers = await manager.servers_add(3, config=DEFAULT_CONFIG, cmdline=DEFAULT_CMDLINE, auto_rack_dc="dc1")
+    (cql, hosts) = await manager.get_ready_cql(servers)
+
+    host_ids = await gather_safely(*[manager.get_host_id(s.server_id) for s in servers])
+
+    def host_by_host_id(host_id):
+        for hid, host in zip(host_ids, hosts):
+            if hid == host_id:
+                return host
+        raise RuntimeError(f"Can't find host for host_id {host_id}")
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', "
+                                          "'replication_factor': 2} AND tablets = {'initial': 10} "
+                                          "AND consistency = 'global'") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, v int);")
+
+        # Find the raft leader for each tablet.
+        # Each tablet has RF=2 replicas on 3 nodes, so we must query a replica
+        # of each tablet's raft group — not all tablets have a replica on servers[0].
+        table_id = await manager.get_table_id(ks, 'test')
+        tablet_rows = await cql.run_async(
+            f"SELECT raft_group_id, replicas, last_token FROM system.tablets WHERE table_id = {table_id}")
+        logger.info(f"Found {len(tablet_rows)} tablets")
+
+        def server_by_host_id(host_id):
+            for hid, s in zip(host_ids, servers):
+                if hid == host_id:
+                    return s
+            raise RuntimeError(f"Can't find server for host_id {host_id}")
+
+        # Build sorted token-to-leader mapping for routing writes.
+        tablet_leaders = []
+        for row in tablet_rows:
+            replica_host_id = HostID(str(row.replicas[0][0]))
+            replica_server = server_by_host_id(replica_host_id)
+            leader_host_id = await wait_for_leader(manager, replica_server, str(row.raft_group_id))
+            tablet_leaders.append((row.last_token, host_by_host_id(leader_host_id)))
+        tablet_leaders.sort(key=lambda x: x[0])
+        sorted_tokens = [t for t, _ in tablet_leaders]
+        sorted_leaders = [h for _, h in tablet_leaders]
+        logger.info(f"Tablet leaders resolved to {len(set(str(h) for h in sorted_leaders))} unique hosts")
+
+        def leader_for_pk(pk: int):
+            token = murmur3(struct.pack('>i', pk))
+            idx = bisect.bisect_left(sorted_tokens, token)
+            if idx >= len(sorted_tokens):
+                idx = 0
+            return sorted_leaders[idx]
+
+        # Start async profiler on all nodes.
+        for s in servers:
+            await manager.api.client.post("/system/task_profiler/start",
+                                          host=s.ip_addr,
+                                          params={"sampling_interval_ms": "10"})
+
+        # 20 concurrent fibers hammering SC inserts for 15 seconds.
+        # Each fiber picks a random tablet leader to send to.
+        stop = asyncio.Event()
+
+        async def write_fiber(fiber_id):
+            stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, v) VALUES (?, ?)")
+            bound = BoundStatement(stmt, consistency_level=ConsistencyLevel.ONE)
+            while not stop.is_set():
+                pk = random.randint(0, 1_000_000)
+                host = leader_for_pk(pk)
+                bound.bind([pk, random.randint(0, 1_000_000)])
+                try:
+                    await cql.run_async(bound, host=host)
+                except Exception as e:
+                    logger.warning(f"Fiber {fiber_id}: {e}")
+                    await asyncio.sleep(0.1)
+
+        fibers = [asyncio.ensure_future(write_fiber(i)) for i in range(20)]
+
+        await asyncio.sleep(15)
+        stop.set()
+        await gather_safely(*fibers)
+
+        # Stop profiler and dump. Each shard writes two files per server:
+        #   <dump_path>.raw.<shard>   per-leaf sample counts
+        #   <dump_path>.norm.<shard>  per-tick presence counts
+        # Both files use the folded-stack format and are independently
+        # consumable by flamegraph.pl.
+        raw_files = []
+        norm_files = []
+        for s in servers:
+            workdir = await manager.server_get_workdir(s.server_id)
+            dump_path = os.path.join(workdir, "async_profile")
+            await manager.api.client.post("/system/task_profiler/stop",
+                                          host=s.ip_addr,
+                                          params={"filename": dump_path})
+            shard_raw = glob.glob(f"{dump_path}.raw.*")
+            shard_norm = glob.glob(f"{dump_path}.norm.*")
+            assert len(shard_raw) > 0, f"No raw dump files for server {s.server_id}"
+            assert len(shard_norm) > 0, f"No normalized dump files for server {s.server_id}"
+            assert len(shard_raw) == len(shard_norm), \
+                f"raw/normalized file count mismatch for server {s.server_id}"
+            raw_files.extend(shard_raw)
+            norm_files.extend(shard_norm)
+
+        # Verify folded-stack format and check we got multi-frame stacks
+        # in both views.
+        def parse_folded(paths):
+            total_samples = 0
+            max_depth = 0
+            for path in paths:
+                with open(path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.rsplit(' ', 1)
+                        assert len(parts) == 2, f"Bad folded-stack line: {line!r}"
+                        count = int(parts[1])
+                        assert count > 0
+                        depth = parts[0].count(';') + 1
+                        max_depth = max(max_depth, depth)
+                        total_samples += count
+            return total_samples, max_depth
+
+        raw_samples, raw_depth = parse_folded(raw_files)
+        norm_samples, norm_depth = parse_folded(norm_files)
+        logger.info(f"Async profiler raw: {raw_samples} samples, max stack depth {raw_depth}, "
+                     f"{len(raw_files)} shard files")
+        logger.info(f"Async profiler norm: {norm_samples} samples, max stack depth {norm_depth}, "
+                     f"{len(norm_files)} shard files")
+        assert raw_samples > 0, "Async profiler raw view produced no samples"
+        assert norm_samples > 0, "Async profiler normalized view produced no samples"
+
+    await gather_safely(*[manager.server_stop_gracefully(s.server_id) for s in servers])
