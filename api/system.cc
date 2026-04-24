@@ -17,6 +17,9 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/core/metrics_api.hh>
 #include <seastar/core/relabel_config.hh>
+#include <seastar/core/task_profiler.hh>
+#include <seastar/core/file.hh>
+#include <seastar/core/fstream.hh>
 #include <seastar/http/exception.hh>
 #include <seastar/util/short_streams.hh>
 #include <seastar/http/short_streams.hh>
@@ -196,6 +199,51 @@ void set_system(http_context& ctx, routes& r) {
             auto format = ctx.db.local().get_user_sstables_manager().get_preferred_sstable_version();
             return make_ready_future<json::json_return_type>(seastar::to_sstring(format));
         });
+    });
+
+    hs::start_task_profiler.set(r, [](std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+        const auto interval_str = req->get_query_param("sampling_interval_ms");
+        unsigned interval_ms = 100;
+        if (!interval_str.empty()) {
+            interval_ms = std::stoi(interval_str);
+            if (interval_ms == 0) {
+                throw httpd::bad_param_exception("sampling_interval_ms must be > 0");
+            }
+        }
+        const auto interval = std::chrono::milliseconds(interval_ms);
+        co_await smp::invoke_on_all([interval] {
+            seastar::task_profiler::start(interval);
+        });
+        co_return json::json_void();
+    });
+
+    hs::stop_task_profiler.set(r, [](std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+        const auto filename = req->get_query_param("filename");
+        if (filename.empty()) {
+            throw httpd::bad_param_exception("filename is required");
+        }
+        // Each shard writes two files:
+        //   <filename>.raw.<shard>   per-leaf sample counts (raw view)
+        //   <filename>.norm.<shard>  per-tick presence counts (normalized view)
+        // Caller merges per-view across shards, e.g.:
+        //   cat <filename>.raw.* | flamegraph.pl > raw.svg
+        //   cat <filename>.norm.* | flamegraph.pl > norm.svg
+        co_await smp::invoke_on_all([&filename] () -> future<> {
+            const auto raw_path = fmt::format("{}.raw.{}", filename, this_shard_id());
+            const auto norm_path = fmt::format("{}.norm.{}", filename, this_shard_id());
+            auto raw_file = co_await open_file_dma(raw_path,
+                open_flags::wo | open_flags::create | open_flags::truncate);
+            auto raw_out = co_await make_file_output_stream(raw_file);
+            auto norm_file = co_await open_file_dma(norm_path,
+                open_flags::wo | open_flags::create | open_flags::truncate);
+            auto norm_out = co_await make_file_output_stream(norm_file);
+            co_await seastar::task_profiler::stop(raw_out, norm_out);
+            co_await raw_out.flush();
+            co_await raw_out.close();
+            co_await norm_out.flush();
+            co_await norm_out.close();
+        });
+        co_return json::json_void();
     });
 }
 

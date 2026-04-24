@@ -221,9 +221,58 @@
                "produces":[
                   "application/json"
                ],
-               "parameters":[]
-            }
-         ]
-      }
+                "parameters":[]
+             }
+          ]
+       },
+       {
+          "path":"/system/task_profiler/start",
+          "operations":[
+             {
+                "method":"POST",
+                "summary":"Start async coroutine profiler on all shards. Samples suspended coroutines at the given interval to produce flamegraph-compatible output.",
+                "type":"void",
+                "nickname":"start_task_profiler",
+                "produces":[
+                   "application/json"
+                ],
+                "parameters":[
+                   {
+                      "name":"sampling_interval_ms",
+                      "description":"Milliseconds between samples (default: 100, typical range: 10-100)",
+                      "required":false,
+                      "allowMultiple":false,
+                      "type":"int",
+                      "paramType":"query",
+                      "defaultValue":"100"
+                   }
+                ]
+             }
+          ]
+       },
+       {
+          "path":"/system/task_profiler/stop",
+          "operations":[
+             {
+                "method":"POST",
+                "summary":"Stop async coroutine profiler on all shards and dump accumulated samples in folded-stack format (for flamegraph.pl) to per-shard files.",
+                "type":"void",
+                "nickname":"stop_task_profiler",
+                "produces":[
+                   "application/json"
+                ],
+                "parameters":[
+                   {
+                      "name":"filename",
+                      "description":"Output file path prefix for the folded stacks (e.g. /tmp/async.folded). Per-shard files will be created as filename.0, filename.1, etc.",
+                      "required":true,
+                      "allowMultiple":false,
+                      "type":"string",
+                      "paramType":"query"
+                   }
+                ]
+             }
+          ]
+       }
    ]
 }
