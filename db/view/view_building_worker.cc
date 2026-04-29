@@ -458,7 +458,10 @@ future<> view_building_worker::update_built_views() {
 future<> view_building_worker::check_for_aborted_tasks() {
     return container().invoke_on_all([building_state = _vb_state_machine.building_state] (view_building_worker& vbw) -> future<> {
         auto lock = co_await get_units(vbw._state._mutex, 1, vbw._as);
-        co_await vbw._state.update_processing_base_table(vbw._db, building_state, vbw._as);
+        // Pass `flush_new_base = false`: this fiber holds the group0 read_apply_mutex,
+        // and a base-table flush here can stall the view_building_coordinator
+        // (see scylladb/scylladb#28051). The flush is performed lazily by work_on_tasks.
+        co_await vbw._state.update_processing_base_table(vbw._db, building_state, vbw._as, false);
         if (!vbw._state._batch) {
             co_return;
         }
@@ -510,12 +513,18 @@ void view_building_worker::state::start_batch(std::unique_ptr<batch> batch) {
     _batch->start();
 }
 
-// If `state::processing_base_table` is different that the `view_building_state::currently_processed_base_table`,
-// clear the state, save and flush new base table
-future<> view_building_worker::state::update_processing_base_table(replica::database& db, const view_building_state& building_state, abort_source& as) {
+// If `state::processing_base_table` is different than the `view_building_state::currently_processed_base_table`,
+// clear the state and (when `flush_new_base` is true) flush the new base table.
+//
+// Callers running on the view_building observer fiber must pass `flush_new_base = false`,
+// because that fiber holds the group0 read_apply_mutex across this call and a long-running
+// base flush would stall the view_building_coordinator (see scylladb/scylladb#28051).
+// Skipping the flush there is safe because `work_on_tasks` performs the flush lazily before
+// any view rows are produced (it checks `flushed_views` and re-flushes when needed).
+future<> view_building_worker::state::update_processing_base_table(replica::database& db, const view_building_state& building_state, abort_source& as, bool flush_new_base) {
     if (processing_base_table != building_state.currently_processed_base_table) {
         co_await clear();
-        if (building_state.currently_processed_base_table) {
+        if (flush_new_base && building_state.currently_processed_base_table) {
             co_await flush_base_table(db, *building_state.currently_processed_base_table, as);
         }
         processing_base_table = building_state.currently_processed_base_table;

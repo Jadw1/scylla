@@ -102,7 +102,14 @@ class view_building_worker : public seastar::peering_sharded_service<view_buildi
         bool _drained = false;
         // All of the methods below should be executed while holding `_mutex` unit!
         void start_batch(std::unique_ptr<batch> batch);
-        future<> update_processing_base_table(replica::database& db, const view_building_state& building_state, abort_source& as);
+        // When `flush_new_base` is true (the default), and the currently processed base table
+        // has changed, the new base table is flushed before returning. The observer fiber
+        // (run_view_building_state_observer) must pass false here, because it holds the group0
+        // read_apply_mutex across this call: flushing the base table can take an arbitrarily long
+        // time, which would stall the view_building_coordinator (see scylladb/scylladb#28051).
+        // Skipping the flush is safe because work_on_tasks() performs the flush lazily based on
+        // the contents of `flushed_views` before any view rows are produced.
+        future<> update_processing_base_table(replica::database& db, const view_building_state& building_state, abort_source& as, bool flush_new_base = true);
         future<> flush_base_table(replica::database& db, table_id base_table_id, abort_source& as);
         future<> clean_up_after_batch();
         future<> clear();
