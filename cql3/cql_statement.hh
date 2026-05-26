@@ -129,14 +129,6 @@ public:
     // once on behalf of all their sub-classes.
     virtual bool should_reclassify_control_connection() const = 0;
 
-    /**
-     * Get inner statements of batch statement.
-     * Non-batch statements return nullopt.
-     */
-    virtual std::optional<std::vector<shared_ptr<cql3::statements::modification_statement>>> get_batch_statements() const {
-        return std::nullopt;
-    }
-
     audit::audit_info* get_audit_info() { return _audit_info.get(); }
     void set_audit_info(audit::audit_info_ptr&& info) { _audit_info = std::move(info); }
 

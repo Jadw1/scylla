@@ -156,10 +156,4 @@ void batch_statement::validate(query_processor& qp, const service::client_state&
     }
 }
 
-std::optional<std::vector<shared_ptr<cql3::statements::modification_statement>>> batch_statement::get_batch_statements() const {
-    return _statements
-            | std::views::transform([] (const single_statement& ss) { return ss.statement->inner(); })
-            | std::ranges::to<std::vector>();
-}
-
 }

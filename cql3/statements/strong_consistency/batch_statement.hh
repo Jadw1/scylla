@@ -60,8 +60,6 @@ public:
 
     virtual void validate(query_processor& qp, const service::client_state& state) const override;
 
-    virtual std::optional<std::vector<shared_ptr<cql3::statements::modification_statement>>> get_batch_statements() const override;
-
     const std::vector<single_statement>& get_statements() const {
         return _statements;
     }
