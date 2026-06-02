@@ -183,7 +183,7 @@ future<> raft_commitlog_replay_buffer::process_raft_replayed_items(replica::data
                 muts.emplace_back(service::strong_consistency::detail::deserialize_to_frozen_mutation(entry));
                 // Resolve schema and upgrade mutation if needed (no barrier during replay).
                 auto schemas = co_await service::strong_consistency::resolve_and_upgrade_mutations(muts, table_id, db, sys_ks);
-                co_await db.apply_in_memory(muts[0], schemas[0], db::rp_handle(), db::no_timeout);
+                co_await db.apply_in_memory(muts[0], schemas[0], db::rp_handle(), db::no_timeout, db::noop_large_data_guardrail::instance());
                 ++applied;
             }
 
