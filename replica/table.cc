@@ -1740,6 +1740,12 @@ table::add_new_sstable_and_update_cache(sstables::shared_sstable new_sst,
         new_sst = nullptr;
         for (auto& sst : ssts) {
             auto& cg = compaction_group_for_sstable(sst);
+            if (!is_internal_keyspace(schema()->ks_name())) {
+                tlogger.warn("[BASE-TRACE] add_sstable {}.{} origin={} state={} requires_view_building={} first_key={} first_token={} last_key={} last_token={}",
+                        schema()->ks_name(), schema()->cf_name(), sst->get_origin(), sst->state(), sst->requires_view_building(),
+                        sst->get_first_decorated_key().key().with_schema(*schema()), sst->get_first_decorated_key().token(),
+                        sst->get_last_decorated_key().key().with_schema(*schema()), sst->get_last_decorated_key().token());
+            }
             // Hold gate to make sure compaction group is alive.
             auto holder = cg.async_gate().hold();
             co_await on_add(sst);
@@ -5155,6 +5161,11 @@ future<> table::apply(const mutation& m, db::rp_handle&& h, db::timeout_clock::t
         return (*_virtual_writer)(freeze(m));
     }
 
+    if (!is_internal_keyspace(schema()->ks_name())) {
+        tlogger.warn("[BASE-TRACE] apply mutation {}.{} key={} token={} shard={}",
+                schema()->ks_name(), schema()->cf_name(), m.decorated_key().key().with_schema(*schema()), m.token(), this_shard_id());
+    }
+
     auto& cg = compaction_group_for_token(m.token());
     auto holder = cg.async_gate().hold();
 
@@ -5172,6 +5183,13 @@ template void table::do_apply(compaction_group& cg, db::rp_handle&&, const mutat
 
 future<> table::apply(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&& h,
                       db::timeout_clock::time_point timeout, shared_ptr<db::large_data_guardrail_base> guardrails, db::large_data_violation_type* violations_out) {
+    if (!is_internal_keyspace(m_schema->ks_name())) {
+        auto dk = m.decorated_key(*m_schema);
+        tlogger.warn("[ASD] apply(frozen_mutation) {}.{} key={} token={} shard={} host={}",
+                m_schema->ks_name(), m_schema->cf_name(), dk.key().with_schema(*m_schema), dk.token(),
+                this_shard_id(), get_effective_replication_map()->get_token_metadata_ptr()->get_topology().my_host_id());
+    }
+
     if (_virtual_writer) [[unlikely]] {
         return (*_virtual_writer)(m);
     }
@@ -5522,16 +5540,25 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(shared_ptr<d
     m.upgrade(base);
     gc_clock::time_point now = gc_clock::now();
 
-    if (!db::view::should_generate_view_updates_on_this_shard(base, get_effective_replication_map(), m.token())) {
+    auto ermp = get_effective_replication_map();
+    if (!db::view::should_generate_view_updates_on_this_shard(base, ermp, m.token())) {
         // This could happen if we are a pending replica.
         // A pending replica may have incomplete data, and building view updates could result
         // in wrong updates. Therefore we don't send updates from a pending replica. Instead, the
         // base replicas send the updates to the view replicas, including pending replicas.
+        auto tmptr = ermp->get_token_metadata_ptr();
+        tlogger.warn("[MV-STAGING] Skipping view update generation for {}.{} key={} token={} on host={} shard={}: base_replicas={} read_replicas={} shards_ready_for_reads={}",
+                base->ks_name(), base->cf_name(), m.decorated_key().key().with_schema(*base), m.token(),
+                tmptr->get_topology().my_host_id(), this_shard_id(), fmt::join(ermp->get_replicas(m.token()), ", "),
+                fmt::join(ermp->get_replicas_for_reading(m.token()), ", "), fmt::join(ermp->shards_ready_for_reads(*base, m.token()), ", "));
         co_return row_locker::lock_holder();
     }
 
     auto views = affected_views(gen, base, m);
     if (views.empty()) {
+        tlogger.warn("[MV-STAGING] Skipping view update generation for {}.{} key={} token={} on host={} shard={}: no affected views among {} views",
+                base->ks_name(), base->cf_name(), m.decorated_key().key().with_schema(*base), m.token(),
+                ermp->get_token_metadata_ptr()->get_topology().my_host_id(), this_shard_id(), _views.size());
         co_return row_locker::lock_holder();
     }
     auto cr_ranges = co_await db::view::calculate_affected_clustering_ranges(gen->get_db().as_data_dictionary(), *base, m.decorated_key(), m.partition(), views);

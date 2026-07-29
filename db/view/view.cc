@@ -12,6 +12,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <iostream>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
@@ -2045,7 +2046,10 @@ future<> view_update_generator::mutate_MV(
         auto view_token = dht::get_token(*mut.s, mut.fm.key());
         auto view_ermp = erms.at(mut.s->id());
         auto [target_endpoint, no_pairing_endpoint] = get_view_natural_endpoint(me, base_ermp, view_ermp, uses_nts, base_token, view_token,
-                uses_tablets, cf_stats);
+            uses_tablets, cf_stats);
+            
+        std::cout << fmt::format("\n[XXX] key: {} | token: {}\ntarget_endpoint: {}, no_pairing_endpoint: {}\nmy host id: {}\n\n", mut.fm.decorated_key(*mut.s).key().with_schema(*mut.s), mut.fm.decorated_key(*mut.s).token(), target_endpoint, no_pairing_endpoint, me);
+    
         auto remote_endpoints = view_ermp->get_pending_replicas(view_token);
         auto memory_units = seastar::make_lw_shared<db::timeout_semaphore_units>(pending_view_update_memory_units.split(memory_usage_of(mut)));
         if (no_pairing_endpoint) {
@@ -2665,20 +2669,29 @@ future<> view_builder::handle_create_view_local(const sstring& ks_name, const ss
     [[maybe_unused]] auto sem_units = co_await get_or_adopt_view_builder_lock(std::move(units));
     auto view = view_ptr(_db.find_schema(ks_name, view_name));
     auto& step = get_or_create_build_step(view->view_info()->base_id());
+    auto my_host_id = step.base->get_effective_replication_map()->get_token_metadata_ptr()->get_topology().my_host_id();
     try {
+        vlogger.warn("[ASD] handle_create_view_local START {}.{} shard={} host={} sstables_before={}",
+                ks_name, view_name, this_shard_id(), my_host_id, step.base->get_sstable_set().size());
         co_await coroutine::all(
             [&step] -> future<> {
                 co_await step.base->await_pending_writes(); },
             [&step] -> future<> {
                 co_await step.base->await_pending_streams(); });
         co_await flush_base(step.base, _as);
+        vlogger.warn("[ASD] handle_create_view_local AFTER FLUSH {}.{} shard={} host={} sstables_after={}",
+                ks_name, view_name, this_shard_id(), my_host_id, step.base->get_sstable_set().size());
     
         // This resets the build step to the current token. It may result in views currently
         // being built to receive duplicate updates, but it simplifies things as we don't have
         // to keep around a list of new views to build the next time the reader crosses a token
         // threshold.
         co_await initialize_reader_at_current_token(step);
+        vlogger.warn("[ASD] handle_create_view_local READER INIT {}.{} shard={} host={} current_token={}",
+                ks_name, view_name, this_shard_id(), my_host_id, step.current_token());
         co_await add_new_view(view, step);
+        vlogger.warn("[ASD] handle_create_view_local AFTER add_new_view {}.{} shard={} host={} build_status_size={}",
+                ks_name, view_name, this_shard_id(), my_host_id, step.build_status.size());
     } catch (abort_requested_exception&) {
         vlogger.debug("Aborted while setting up view for building {}.{}", view->ks_name(), view->cf_name());
     } catch (raft::request_aborted&) {
@@ -3004,9 +3017,14 @@ public:
             , _builder(builder)
             , _step(step)
             , _built_views{step} {
-        if (!step.current_key.key().is_empty(*_step.reader.schema())) {
+        bool current_key_empty = step.current_key.key().is_empty(*_step.reader.schema());
+        vlogger.warn("[ASD] consumer ctor shard={} current_key_empty={} build_status_size={}",
+                this_shard_id(), current_key_empty, _step.build_status.size());
+        if (!current_key_empty) {
             load_views_to_build();
         }
+        vlogger.warn("[ASD] consumer ctor AFTER shard={} views_to_build_size={}",
+                this_shard_id(), _views_to_build.size());
     }
 
     stop_iteration consume_new_partition(const dht::decorated_key& dk) {
@@ -3014,6 +3032,8 @@ public:
         if (dk.key().is_empty()) {
             on_internal_error(vlogger, format("Trying to consume empty partition key {}", dk));
         }
+        vlogger.warn("[ASD] consume_new_partition shard={} key={} token={}",
+                this_shard_id(), dk.key().with_schema(*base()->schema()), dk.token());
         set_current_key(std::move(dk));
         check_for_built_views();
         _views_to_build.clear();
@@ -3070,6 +3090,7 @@ public:
         inject_failure("view_builder_flush_fragments");
         _builder._as.check();
         if (!_fragments.empty()) {
+            std::cout << fmt::format("\n[BUILDER] flushing partition\nley: {} | token: {}\n\n", get_current_key().key().with_schema(*base()->schema()), get_current_key().token());
             _fragments.emplace_front(*reader().schema(), permit(), partition_start(get_current_key(), tombstone()));
             auto base_schema = base()->schema();
             auto fragments_reader = make_mutation_reader_from_fragments(reader().schema(), permit(), std::move(_fragments));
@@ -3141,7 +3162,7 @@ void view_builder::execute(build_step& step, exponential_backoff_retry r) {
         step.reader.unpop_mutation_fragment(mutation_fragment_v2(*step.reader.schema(), step.reader.permit(), std::move(ds->partition_start)));
     }
 
-    utils::get_local_injector().inject("view_builder_pause_before_mark_success", utils::wait_for_message(std::chrono::minutes(10), &_as)).get();
+    // utils::get_local_injector().inject("view_builder_pause_before_mark_success", utils::wait_for_message(std::chrono::minutes(10), &_as)).get();
     _as.check();
 
     std::vector<future<>> bookkeeping_ops;
@@ -3190,22 +3211,24 @@ future<> view_builder::maybe_mark_view_as_built(view_ptr view, dht::token next_t
                 return result && shard_complete;
             }).then([this, view, next_token = std::move(next_token)] (bool built) {
         if (built) {
-            inject_failure("view_builder_mark_view_as_built");
-            return container().invoke_on_all([view_id = view->id()] (view_builder& builder) {
-                if (builder._built_views.erase(view_id) == 0 || this_shard_id() != 0) {
-                    return make_ready_future<>();
-                }
-                auto view = builder._db.find_schema(view_id);
-                vlogger.info("Finished building view {}.{}", view->ks_name(), view->cf_name());
-                return builder.mark_as_built(view_ptr(view)).then([&builder, view] {
-                    // The view is built, so shard 0 can remove the entry in the build progress system table on
-                    // behalf of all shards. It is guaranteed to have a higher timestamp than the per-shard entries.
-                    return builder._sys_ks.remove_view_build_progress_across_all_shards(view->ks_name(), view->cf_name());
-                }).then([&builder, view] {
-                    auto it = builder._build_notifiers.find(std::pair(view->ks_name(), view->cf_name()));
-                    if (it != builder._build_notifiers.end()) {
-                        it->second.set_value();
+            return utils::get_local_injector().inject("view_builder_pause_before_mark_success", utils::wait_for_message(std::chrono::minutes(10), &_as)).then([this, view] {
+                inject_failure("view_builder_mark_view_as_built");
+                return container().invoke_on_all([view_id = view->id()] (view_builder& builder) {
+                    if (builder._built_views.erase(view_id) == 0 || this_shard_id() != 0) {
+                        return make_ready_future<>();
                     }
+                    auto view = builder._db.find_schema(view_id);
+                    vlogger.info("Finished building view {}.{}", view->ks_name(), view->cf_name());
+                    return builder.mark_as_built(view_ptr(view)).then([&builder, view] {
+                        // The view is built, so shard 0 can remove the entry in the build progress system table on
+                        // behalf of all shards. It is guaranteed to have a higher timestamp than the per-shard entries.
+                        return builder._sys_ks.remove_view_build_progress_across_all_shards(view->ks_name(), view->cf_name());
+                    }).then([&builder, view] {
+                        auto it = builder._build_notifiers.find(std::pair(view->ks_name(), view->cf_name()));
+                        if (it != builder._build_notifiers.end()) {
+                            it->second.set_value();
+                        }
+                    });
                 });
             });
         }
@@ -3354,6 +3377,7 @@ void view_updating_consumer::do_flush_buffer() {
 
     while (!_buffer.empty()) {
         try {
+            std::cout << fmt::format("\n[STAGING] flushing partition\nkey: {} | token: {}\n\n", _buffer.front().key().with_schema(*_schema), _buffer.front().token());
             auto lock_holder = _view_update_pusher(std::move(_buffer.front())).get();
         } catch (...) {
             vlogger.warn("Failed to push replica updates for table {}.{}: {}", _schema->ks_name(), _schema->cf_name(), std::current_exception());

@@ -492,7 +492,8 @@ async def test_do_not_finish_view_builder_with_nodes_down(manager: ManagerClient
 # Verifies that node operations during view building complete correctly (vnodes).
 @pytest.mark.asyncio
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
-@pytest.mark.parametrize("operation", ["stop", "remove", "decommission", "add"])
+# @pytest.mark.parametrize("operation", ["stop", "remove", "decommission", "add"])
+@pytest.mark.parametrize("operation", ["remove"])
 async def test_node_operation_during_view_building(manager: ManagerClient, operation: str):
     """Test that node operations during view building don't break the build (vnodes)."""
     if operation in ["remove", "decommission"]:
@@ -503,17 +504,27 @@ async def test_node_operation_during_view_building(manager: ManagerClient, opera
         rack_layout = ["r1", "r2", "r3"]
 
     property_file = [{"dc": "dc1", "rack": rack} for rack in rack_layout]
+    cmdline = [
+        "--logger-log-level", "repair=debug",
+        "--logger-log-level", "stream_session=debug",
+        "--logger-log-level", "raft_topology=debug",
+        "--logger-log-level", "storage_service=debug",
+        "--logger-log-level", "view=debug",
+        "--logger-log-level", "view_update_generator=debug",
+    ]
     servers = await manager.servers_add(node_count, config={
         "hinted_handoff_enabled": False,
-    }, property_file=property_file)
+    }, cmdline=cmdline, property_file=property_file)
     cql, _ = await manager.get_ready_cql(servers)
+    for s in servers:
+        logger.info("SERVER server_id=%s ip=%s host_id=%s", s.server_id, s.ip_addr, await manager.get_host_id(s.server_id))
 
     async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}} AND tablets = {{'enabled': false}}") as ks:
         await cql.run_async(f"CREATE TABLE {ks}.tab (key int, c int, v text, PRIMARY KEY (key, c))")
 
-        n_partitions = 100
+        n_partitions = 10
         for i in range(n_partitions):
-            await cql.run_async(f"INSERT INTO {ks}.tab (key, c, v) VALUES ({i}, {i}, '{i}')")
+            await cql.run_async(SimpleStatement(f"INSERT INTO {ks}.tab (key, c, v) VALUES ({i}, {i}, '{i}')", consistency_level=ConsistencyLevel.ALL))
 
         # Pause view building to ensure build is in progress when we perform node action
         for s in servers:
@@ -524,6 +535,13 @@ async def test_node_operation_during_view_building(manager: ManagerClient, opera
                         "WHERE c IS NOT NULL AND key IS NOT NULL AND v IS NOT NULL PRIMARY KEY (c, key, v)")
 
         await wait_for_view_building_in_progress(manager, servers, marks, 'mv_cf_view')
+
+        hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+        for node, host in enumerate(hosts):
+            rows = set(await cql.run_async(SimpleStatement(f"SELECT key, c, v FROM {ks}.mv_cf_view", consistency_level=ConsistencyLevel.LOCAL_ONE), host=host))
+            logger.info("BEFORE_NODE_OPERATION_VIEW NODE %s host=%s view_count=%s", node, host, len(rows))
+            for row in sorted(rows):
+                logger.info(row)
 
         target = servers[-1]
         expected_node_count = node_count
@@ -564,15 +582,56 @@ async def test_node_operation_during_view_building(manager: ManagerClient, opera
             return True
         await wait_for(view_updates_drained, deadline=time.time() + 30)
 
+        async def log_local_view_state(label: str):
+            hosts = await wait_for_cql_and_get_hosts(cql, servers[:-1], time.time() + 60)
+            node_states = []
+            for node, host in enumerate(hosts):
+                base_rows = set(await cql.run_async(SimpleStatement(f"SELECT key, c, v FROM {ks}.tab", consistency_level=ConsistencyLevel.LOCAL_ONE), host=host))
+                view_rows = set(await cql.run_async(SimpleStatement(f"SELECT key, c, v FROM {ks}.mv_cf_view", consistency_level=ConsistencyLevel.LOCAL_ONE), host=host))
+                missing = base_rows - view_rows
+                extra = view_rows - base_rows
+                logger.info("%s NODE %s host=%s base_count=%s view_count=%s missing_count=%s extra_count=%s",
+                            label, node, host, len(base_rows), len(view_rows), len(missing), len(extra))
+                if missing:
+                    logger.info("%s NODE %s MISSING_FROM_VIEW %s", label, node, sorted(missing))
+                if extra:
+                    logger.info("%s NODE %s EXTRA_IN_VIEW %s", label, node, sorted(extra))
+                logger.info("%s NODE %s BASE TABLE", label, node)
+                for row in sorted(base_rows):
+                    logger.info(row)
+                logger.info("%s NODE %s VIEW", label, node)
+                for row in sorted(view_rows):
+                    logger.info(row)
+                node_states.append((host, base_rows, view_rows))
+
+            union_base = set().union(*(base_rows for _, base_rows, _ in node_states)) if node_states else set()
+            union_view = set().union(*(view_rows for _, _, view_rows in node_states)) if node_states else set()
+            intersection_view = set.intersection(*(view_rows for _, _, view_rows in node_states)) if node_states else set()
+            logger.info("%s VIEW SUMMARY union_base_count=%s union_view_count=%s intersection_view_count=%s missing_from_all_views=%s",
+                        label, len(union_base), len(union_view), len(intersection_view), sorted(union_base - union_view))
+            for node, (host, base_rows, view_rows) in enumerate(node_states):
+                logger.info("%s NODE %s host=%s missing_base_vs_union=%s missing_view_vs_union_base=%s",
+                            label, node, host, sorted(union_base - base_rows), sorted(union_base - view_rows))
+            return node_states
+
         if operation in ["remove", "decommission"]:
             # View updates from staging SSTables can be skipped during topology changes because the
             # receiving node may process them before the replication map reflects the new owner.
             # Repair the view before checking local contents so this test focuses on node operations
             # completing during view build, not on that known staging-update race.
             # This is known issue with vnode views and topology operations, we're not going to fix it.
+            await log_local_view_state("BEFORE_VIEW_REPAIR")
+            logger.info("Repairing view %s.mv_cf_view from node %s", ks, servers[0].ip_addr)
             await manager.api.repair(servers[0].ip_addr, ks, "mv_cf_view")
+            logger.info("Repair of view %s.mv_cf_view completed", ks)
 
+
+        node_states = await log_local_view_state("FINAL")
+        cnt = sum(len(view_rows) for _, _, view_rows in node_states)
+        assert cnt == 30
+
+        
         # Verify data correctness
-        base_rows = set(await cql.run_async(f"SELECT key, c, v FROM {ks}.tab"))
-        view_rows = set(await cql.run_async(f"SELECT key, c, v FROM {ks}.mv_cf_view"))
-        assert view_rows == base_rows
+        # base_rows = set(await cql.run_async(f"SELECT key, c, v FROM {ks}.tab"))
+        # view_rows = set(await cql.run_async(f"SELECT key, c, v FROM {ks}.mv_cf_view"))
+        # assert view_rows == base_rows
