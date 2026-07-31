@@ -2227,6 +2227,7 @@ void view_builder::setup_metrics() {
 }
 
 future<> view_builder::start_in_background(service::migration_manager& mm, utils::cross_shard_barrier barrier) {
+    std::cout << "\n[QQQ] starting background fiber\n\n";
     auto step_fiber = make_ready_future<>();
     try {
         view_builder_init_state vbi;
@@ -2242,8 +2243,10 @@ future<> view_builder::start_in_background(service::migration_manager& mm, utils
         // Guard the whole startup routine with a semaphore so that it's not intercepted by
         // `on_drop_view`, `on_create_view`, or `on_update_view` events.
         auto units = co_await get_units(_sem, view_builder_semaphore_units);
+        std::cout << "\n[QQQ] got units\n\n";
         // Wait for schema agreement even if we're a seed node.
         co_await mm.wait_for_schema_agreement(_db, db::timeout_clock::time_point::max(), &_as);
+        std::cout << "\n[QQQ] got schema agreement\n\n";
 
         auto built = co_await _sys_ks.load_built_views();
         auto in_progress = co_await _sys_ks.load_view_build_progress();
@@ -2259,6 +2262,7 @@ future<> view_builder::start_in_background(service::migration_manager& mm, utils
         co_await barrier.arrive_and_wait();
 
         _mnotifier.register_listener(this);
+        std::cout << "\n[QQQ] registered listeners\n\n";
         co_await calculate_shard_build_step(vbi);
         _current_step = _base_to_build_step.begin();
 
@@ -2507,7 +2511,9 @@ future<> view_builder::calculate_shard_build_step(view_builder_init_state& vbi) 
         return _db.column_family_exists(v->view_info()->base_id()) && !loaded_views.contains(v->id())
                 && !vbi.built_views.contains(v->id());
     };
+
     for (auto&& view : all_views | std::views::filter(doesnt_use_tablets) | std::views::filter(is_new)) {
+        std::cout << fmt::format("\n[QQQ] adding view {} via calculate_shard_build_step()\n\n", view->cf_name());
         vbi.bookkeeping_ops.push_back(add_new_view(view, get_or_create_build_step(view->view_info()->base_id())));
     }
 
@@ -2673,11 +2679,13 @@ future<> view_builder::handle_create_view_local(const sstring& ks_name, const ss
     try {
         vlogger.warn("[ASD] handle_create_view_local START {}.{} shard={} host={} sstables_before={}",
                 ks_name, view_name, this_shard_id(), my_host_id, step.base->get_sstable_set().size());
+        std::cout << fmt::format("\n[QQQ] awaiting pending writes/streams for base table: {}\n\n", step.base->schema()->cf_name());
         co_await coroutine::all(
             [&step] -> future<> {
                 co_await step.base->await_pending_writes(); },
             [&step] -> future<> {
                 co_await step.base->await_pending_streams(); });
+        std::cout << fmt::format("\n[QQQ] flushing base table: {}\n\n", step.base->schema()->cf_name());
         co_await flush_base(step.base, _as);
         vlogger.warn("[ASD] handle_create_view_local AFTER FLUSH {}.{} shard={} host={} sstables_after={}",
                 ks_name, view_name, this_shard_id(), my_host_id, step.base->get_sstable_set().size());
@@ -2689,6 +2697,7 @@ future<> view_builder::handle_create_view_local(const sstring& ks_name, const ss
         co_await initialize_reader_at_current_token(step);
         vlogger.warn("[ASD] handle_create_view_local READER INIT {}.{} shard={} host={} current_token={}",
                 ks_name, view_name, this_shard_id(), my_host_id, step.current_token());
+        std::cout << fmt::format("\n[QQQ] adding view {} via handle_create_view_local()\n\n", view->cf_name());
         co_await add_new_view(view, step);
         vlogger.warn("[ASD] handle_create_view_local AFTER add_new_view {}.{} shard={} host={} build_status_size={}",
                 ks_name, view_name, this_shard_id(), my_host_id, step.build_status.size());

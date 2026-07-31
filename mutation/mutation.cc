@@ -149,7 +149,7 @@ future<> mutation::apply_gently(mutation&& m) {
     mutation_application_stats app_stats;
     while (partition().apply_monotonically(*schema(), std::move(m.partition()), nullptr, app_stats,
                                            is_preemptible::yes, res) == stop_iteration::no) {
-        co_await coroutine::maybe_yield();
+        co_await seastar::maybe_yield();
     }
 }
 
