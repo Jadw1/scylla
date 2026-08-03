@@ -2512,13 +2512,38 @@ future<> view_builder::calculate_shard_build_step(view_builder_init_state& vbi) 
                 && !vbi.built_views.contains(v->id());
     };
 
-    for (auto&& view : all_views | std::views::filter(doesnt_use_tablets) | std::views::filter(is_new)) {
-        std::cout << fmt::format("\n[QQQ] adding view {} via calculate_shard_build_step()\n\n", view->cf_name());
-        vbi.bookkeeping_ops.push_back(add_new_view(view, get_or_create_build_step(view->view_info()->base_id())));
-    }
+    auto new_views = all_views | std::views::filter(doesnt_use_tablets) | std::views::filter(is_new) | std::ranges::to<std::vector>();
 
-    return parallel_for_each(_base_to_build_step, [this] (auto& p) {
-        return initialize_reader_at_current_token(p.second);
+    // Newly discovered views (created while this shard's view_builder was still starting up,
+    // e.g. stuck waiting for schema agreement) may have base rows that are only in the
+    // memtable and were never flushed. Unlike handle_create_view_local() (used for views
+    // created after startup), this function used to call initialize_reader_at_current_token()
+    // directly, whose reader only sees get_sstable_set() - silently missing such rows and
+    // marking the view as "built" without them. Mirror handle_create_view_local() here: wait
+    // for any in-flight writes/streams and flush each new view's base table before scanning it.
+    std::unordered_set<table_id> flushed_bases;
+    return do_for_each(new_views, [this, &flushed_bases] (const view_ptr& view) -> future<> {
+        auto base_id = view->view_info()->base_id();
+        if (!flushed_bases.insert(base_id).second) {
+            co_return;
+        }
+        auto& step = get_or_create_build_step(base_id);
+        std::cout << fmt::format("\n[QQQ] awaiting pending writes/streams for base table: {}\n\n", step.base->schema()->cf_name());
+        co_await coroutine::all(
+            [&step] -> future<> {
+                co_await step.base->await_pending_writes(); },
+            [&step] -> future<> {
+                co_await step.base->await_pending_streams(); });
+        std::cout << fmt::format("\n[QQQ] flushing base table: {}\n\n", step.base->schema()->cf_name());
+        co_await flush_base(step.base, _as);
+    }).then([this, new_views = std::move(new_views), &vbi] {
+        for (auto&& view : new_views) {
+            std::cout << fmt::format("\n[QQQ] adding view {} via calculate_shard_build_step()\n\n", view->cf_name());
+            vbi.bookkeeping_ops.push_back(add_new_view(view, get_or_create_build_step(view->view_info()->base_id())));
+        }
+        return parallel_for_each(_base_to_build_step, [this] (auto& p) {
+            return initialize_reader_at_current_token(p.second);
+        });
     }).then([&vbi] {
         return seastar::when_all_succeed(vbi.bookkeeping_ops.begin(), vbi.bookkeeping_ops.end()).handle_exception([] (std::exception_ptr ep) {
             vlogger.warn("Failed to update materialized view bookkeeping while synchronizing view builds on all shards ({}), continuing anyway.", ep);
