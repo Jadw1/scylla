@@ -36,6 +36,10 @@ static logging::logger rlogger("commitlog_replayer");
 class db::commitlog_replayer::impl {
     struct column_mappings {
         std::unordered_map<table_schema_version, column_mapping> map;
+        // SCYLLADB-4978 diagnostics: where each mapping came from and the
+        // previous entry, to tell a writer problem from a reader problem.
+        std::unordered_map<table_schema_version, replay_position> origin;
+        replay_position last_rp;
         future<> stop() { return make_ready_future<>(); }
     };
 
@@ -240,16 +244,35 @@ future<> db::commitlog_replayer::impl::process(
 
             auto& fm = mut_entry.mutation();
 
-            auto& local_cm = _column_mappings.local().map;
+            auto& cms = _column_mappings.local();
+            auto& local_cm = cms.map;
             auto cm_it = local_cm.find(fm.schema_version());
             if (cm_it == local_cm.end()) {
                 if (!mut_entry.mapping()) {
-                    rlogger.debug("replaying at {} v={} at {}", fm.column_family_id(), fm.schema_version(), rp);
-                    throw std::runtime_error(format("unknown schema version {}, table={}", fm.schema_version(), fm.column_family_id()));
+                    size_t from_segment = 0;
+                    replay_position first, last;
+                    for (const auto& [v, orp] : cms.origin) {
+                        if (orp.id != rp.id) {
+                            continue;
+                        }
+                        ++from_segment;
+                        if (first == replay_position() || orp < first) {
+                            first = orp;
+                        }
+                        if (last < orp) {
+                            last = orp;
+                        }
+                    }
+                    rlogger.warn("entry at {} for table {} v={} has no column mapping and the version was not seen before; "
+                            "previous entry at {}; {} mappings came from this segment, first at {}, last at {}",
+                            rp, fm.column_family_id(), fm.schema_version(), cms.last_rp, from_segment, first, last);
+                    throw std::runtime_error(format("unknown schema version {}, table={}, at {}", fm.schema_version(), fm.column_family_id(), rp));
                 }
                 rlogger.debug("new schema version {} in entry {}", fm.schema_version(), rp);
                 cm_it = local_cm.emplace(fm.schema_version(), *mut_entry.mapping()).first;
+                cms.origin.emplace(fm.schema_version(), rp);
             }
+            cms.last_rp = rp;
             const column_mapping& src_cm = cm_it->second;
 
             auto shard_id = rp.shard_id();

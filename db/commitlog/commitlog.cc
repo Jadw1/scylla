@@ -783,6 +783,9 @@ class db::commitlog::segment : public enable_shared_from_this<segment>, public c
     uint64_t _num_allocs = 0;
 
     std::unordered_set<table_schema_version> _known_schema_versions;
+    // Versions whose mapping was really written into the current buffer; kept
+    // apart from _known_schema_versions to check it (SCYLLADB-4978).
+    std::unordered_set<table_schema_version> _mapped_in_buffer;
 
     friend sstring format_as(const segment& s) {
         return s._desc.filename();
@@ -888,9 +891,19 @@ public:
     }
     void add_schema_version(schema_ptr s) {
         _known_schema_versions.emplace(s->version());
+        _mapped_in_buffer.emplace(s->version());
     }
     void forget_schema_versions() {
         _known_schema_versions.clear();
+    }
+    // SCYLLADB-4978: an entry written without a column mapping must follow one
+    // with the mapping in the same buffer. Warn when it does not.
+    void verify_schema_version_written(const schema_ptr& s) {
+        if (!_mapped_in_buffer.contains(s->version())) {
+            clogger.warn("{}: entry of {}.{} v={} written at {} without a column mapping, none in this buffer (pos={}, entries={}, known={})",
+                    fmt::streamed(*this), s->ks_name(), s->cf_name(), s->version(), position(), buffer_position(), _num_allocs,
+                    _known_schema_versions.contains(s->version()));
+        }
     }
     // Tags can currently only be set for segments using the 'variant' entry format,
     // where commitlog items may be either mutations or Raft log entries.
@@ -1062,6 +1075,7 @@ public:
      */
     void new_buffer(size_t size_in) {
         SCYLLA_ASSERT(_buffer.empty());
+        _mapped_in_buffer.clear();
         auto [s, overhead] = buffer_usage_size(size_in);
         // add bookkeep data reqs. 
         auto a = align_up(s + sector_overhead(s), _alignment);
@@ -3158,6 +3172,8 @@ future<db::rp_handle> db::commitlog::add_entry(const cf_id_type& id, const commi
         void write(segment& seg, output& out, size_t) const override {
             if (_writer.with_schema()) {
                 seg.add_schema_version(_writer.schema());
+            } else {
+                seg.verify_schema_version_written(_writer.schema());
             }
             _writer.write(out);
         }
@@ -3223,6 +3239,8 @@ db::commitlog::add_entries(utils::chunked_vector<commitlog_mutation_entry_writer
             auto& w = _writers.at(i);
             if (w.with_schema()) {
                 seg.add_schema_version(w.schema());
+            } else {
+                seg.verify_schema_version_written(w.schema());
             }
             w.write(out);
         }
